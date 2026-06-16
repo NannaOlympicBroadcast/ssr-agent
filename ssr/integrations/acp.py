@@ -50,11 +50,21 @@ class ACPServer:
         params = msg.get("params") or {}
 
         if method == "initialize":
+            # Echo a protocol version we support that is <= the client's, per spec.
+            client_version = params.get("protocolVersion", PROTOCOL_VERSION)
+            try:
+                negotiated = min(int(client_version), PROTOCOL_VERSION)
+            except (TypeError, ValueError):
+                negotiated = PROTOCOL_VERSION
             self._result(
                 rid,
                 {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "agentCapabilities": {"promptCapabilities": {"image": False}},
+                    "protocolVersion": negotiated,
+                    "agentCapabilities": {
+                        "loadSession": False,
+                        "promptCapabilities": {"image": False, "audio": False, "embeddedContext": True},
+                    },
+                    "authMethods": [],
                     "serverInfo": {"name": "ssr-agent", "version": "0.1.0"},
                 },
             )
