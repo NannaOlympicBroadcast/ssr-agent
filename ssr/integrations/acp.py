@@ -1,0 +1,116 @@
+"""Agent Client Protocol (ACP) server.
+
+Exposes the SSR agent over ACP (https://agentclientprotocol.com) so ACP-capable
+clients (e.g. Zed) can drive it. Invoked via ``ssr --experimental-acp``.
+
+This is a minimal newline-delimited JSON-RPC 2.0 implementation over stdio
+covering the core handshake: ``initialize``, ``session/new``, ``session/prompt``
+and ``session/cancel``, emitting ``session/update`` notifications for output.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import uuid
+
+from ..config import Settings
+
+PROTOCOL_VERSION = 1
+
+
+class ACPServer:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.sessions: dict[str, object] = {}
+        self._out = sys.stdout
+
+    # --- framing -----------------------------------------------------------
+    def _send(self, obj: dict) -> None:
+        self._out.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        self._out.flush()
+
+    def _result(self, rid, result) -> None:
+        self._send({"jsonrpc": "2.0", "id": rid, "result": result})
+
+    def _error(self, rid, code: int, message: str) -> None:
+        self._send({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
+
+    def _notify(self, method: str, params: dict) -> None:
+        self._send({"jsonrpc": "2.0", "method": method, "params": params})
+
+    # --- handlers ----------------------------------------------------------
+    def handle(self, msg: dict) -> None:
+        method = msg.get("method")
+        rid = msg.get("id")
+        params = msg.get("params") or {}
+
+        if method == "initialize":
+            self._result(
+                rid,
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "agentCapabilities": {"promptCapabilities": {"image": False}},
+                    "serverInfo": {"name": "ssr-agent", "version": "0.1.0"},
+                },
+            )
+        elif method == "session/new":
+            from ..agent.core import SSRAgent
+
+            sid = str(uuid.uuid4())
+            self.sessions[sid] = SSRAgent(self.settings)
+            self._result(rid, {"sessionId": sid})
+        elif method == "session/prompt":
+            sid = params.get("sessionId")
+            agent = self.sessions.get(sid)
+            if agent is None:
+                return self._error(rid, -32602, f"unknown session {sid}")
+            text = _extract_text(params.get("prompt", []))
+            reply = agent.run(text)  # type: ignore[attr-defined]
+            self._notify(
+                "session/update",
+                {
+                    "sessionId": sid,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": reply},
+                    },
+                },
+            )
+            self._result(rid, {"stopReason": "end_turn"})
+        elif method == "session/cancel":
+            self._result(rid, {})
+        elif method is None:
+            return  # response/ack we don't track
+        else:
+            if rid is not None:
+                self._error(rid, -32601, f"method not found: {method}")
+
+    def serve(self) -> None:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            try:
+                self.handle(msg)
+            except Exception as e:  # keep the loop alive
+                if msg.get("id") is not None:
+                    self._error(msg["id"], -32603, str(e))
+
+
+def _extract_text(prompt_blocks: list) -> str:
+    out = []
+    for block in prompt_blocks:
+        if isinstance(block, dict) and block.get("type") == "text":
+            out.append(block.get("text", ""))
+        elif isinstance(block, str):
+            out.append(block)
+    return "\n".join(out)
+
+
+def run_acp(settings: Settings) -> None:
+    ACPServer(settings).serve()

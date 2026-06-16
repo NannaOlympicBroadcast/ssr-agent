@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssr-agent"
+version = "0.1.0"
+description = "SSR Agent — a beautiful command-line coding agent built on Google ADK. 支持 snh48 宋昕冉 谢谢喵"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "SSR Agent" }]
+keywords = ["agent", "cli", "coding-agent", "google-adk", "gemini", "acp", "tui"]
+
+dependencies = [
+  "google-adk>=0.3.0",
+  "google-genai>=0.3.0",
+  "rich>=13.7",
+  "pyfiglet>=1.0",
+  "prompt_toolkit>=3.0",
+  "python-dotenv>=1.0",
+  "numpy>=1.24",
+  "model2vec>=0.3.0",
+  "tavily-python>=0.5.0",
+  "httpx>=0.27",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+acp = ["websockets>=12.0"]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+ssr = "ssr.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ssr*"]
+
+[tool.setuptools.package-data]
+"ssr" = ["builtin_skills/**/*", "assets/**/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
