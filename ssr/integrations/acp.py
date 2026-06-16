@@ -62,7 +62,7 @@ class ACPServer:
                     "protocolVersion": negotiated,
                     "agentCapabilities": {
                         "loadSession": False,
-                        "promptCapabilities": {"image": False, "audio": False, "embeddedContext": True},
+                        "promptCapabilities": {"image": True, "audio": True, "embeddedContext": True},
                     },
                     "authMethods": [],
                     "serverInfo": {"name": "ssr-agent", "version": "0.1.0"},
@@ -79,8 +79,8 @@ class ACPServer:
             agent = self.sessions.get(sid)
             if agent is None:
                 return self._error(rid, -32602, f"unknown session {sid}")
-            text = _extract_text(params.get("prompt", []))
-            reply = agent.run(text)  # type: ignore[attr-defined]
+            parts = _extract_parts(params.get("prompt", []))
+            reply = agent.run_parts(parts)  # type: ignore[attr-defined]
             self._notify(
                 "session/update",
                 {
@@ -116,14 +116,46 @@ class ACPServer:
                     self._error(msg["id"], -32603, str(e))
 
 
-def _extract_text(prompt_blocks: list) -> str:
-    out = []
+def _extract_parts(prompt_blocks: list) -> list[dict]:
+    """Normalise ACP prompt content blocks into agent input parts.
+
+    Handles ACP ``text``, ``image`` and ``audio`` blocks (base64 ``data`` with a
+    ``mimeType``), plus ``resource_link`` / embedded ``resource`` references.
+    """
+    import base64
+
+    parts: list[dict] = []
     for block in prompt_blocks:
-        if isinstance(block, dict) and block.get("type") == "text":
-            out.append(block.get("text", ""))
-        elif isinstance(block, str):
-            out.append(block)
-    return "\n".join(out)
+        if isinstance(block, str):
+            parts.append({"type": "text", "text": block})
+            continue
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            parts.append({"type": "text", "text": block.get("text", "")})
+        elif btype in ("image", "audio"):
+            data = block.get("data")
+            try:
+                raw = base64.b64decode(data) if data else None
+            except Exception:
+                raw = None
+            if raw:
+                parts.append(
+                    {
+                        "type": btype,
+                        "mime_type": block.get("mimeType") or block.get("mime_type"),
+                        "data": raw,
+                    }
+                )
+        elif btype in ("resource_link", "resource"):
+            res = block.get("resource") or {}
+            uri = block.get("uri") or res.get("uri", "")
+            if res.get("text"):  # embedded text resource
+                parts.append({"type": "text", "text": res["text"]})
+            elif uri:
+                parts.append({"type": "text", "text": f"[resource] {uri}"})
+    return parts
 
 
 def run_acp(settings: Settings) -> None:

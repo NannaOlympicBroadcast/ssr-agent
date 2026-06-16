@@ -193,12 +193,47 @@ def _extract_text(content: str) -> str:
     return " ".join(chunks).strip() or content
 
 
-def build_event_handler(settings: Settings, send_reply):
+def _build_parts(msg, fetch_resource) -> list[dict]:
+    """Turn a Feishu message into agent input parts (text / image / audio).
+
+    ``fetch_resource(message_id, file_key, rtype)`` downloads media bytes, where
+    ``rtype`` is "image" or "file"; it may be None when downloads are unavailable.
+    """
+    mtype = getattr(msg, "message_type", "text")
+    try:
+        content = json.loads(msg.content)
+    except (json.JSONDecodeError, TypeError):
+        content = {}
+
+    if mtype == "image":
+        key = content.get("image_key")
+        raw = fetch_resource(msg.message_id, key, "image") if (fetch_resource and key) else None
+        if raw:
+            return [{"type": "image", "mime_type": "image/png", "data": raw}]
+        return [{"type": "text", "text": "[image received but could not be downloaded]"}]
+
+    if mtype in ("audio", "media", "file"):
+        key = content.get("file_key")
+        raw = fetch_resource(msg.message_id, key, "file") if (fetch_resource and key) else None
+        if raw:
+            kind = "audio" if mtype == "audio" else "image"  # 'media' often a video; treat unknown as audio
+            mime = "audio/ogg" if mtype == "audio" else (content.get("file_name", "") or "application/octet-stream")
+            if mtype == "audio":
+                return [{"type": "audio", "mime_type": "audio/ogg", "data": raw}]
+            # non-audio files: hand the agent a note (it can't ingest arbitrary bytes)
+        return [{"type": "text", "text": f"[{mtype} message received]"}]
+
+    return [{"type": "text", "text": _extract_text(msg.content)}]
+
+
+def build_event_handler(settings: Settings, send_reply, fetch_resource=None):
     """Build a lark EventDispatcherHandler bound to the SSR agent.
 
     ``send_reply(message_id, chat_id, text)`` posts the agent's answer back.
-    Each inbound message runs the agent in a worker thread so the long
-    connection's receive loop stays responsive.
+    ``fetch_resource(message_id, file_key, rtype)`` optionally downloads image /
+    audio bytes so the multimodal agent can see them. Each inbound message runs
+    the agent in a worker thread so the long connection's receive loop stays
+    responsive.
     """
     import threading
 
@@ -222,13 +257,13 @@ def build_event_handler(settings: Settings, send_reply):
             if message_id in seen_ids:  # Feishu may redeliver; dedupe.
                 return
             seen_ids.add(message_id)
-        text = _extract_text(msg.content)
-        if not text.strip():
+        parts = _build_parts(msg, fetch_resource)
+        if not parts:
             return
 
         def worker():
             try:
-                reply = agent.run(text)
+                reply = agent.run_parts(parts)
             except Exception as e:  # never crash the connection
                 reply = f"[ssr error] {e}"
             send_reply(message_id, msg.chat_id, reply)
@@ -275,7 +310,31 @@ def serve_long_connection(settings: Settings) -> None:
         if not resp.success():
             print(f"[feishu] send failed: {resp.code} {resp.msg}")
 
-    handler = build_event_handler(settings, send_reply)
+    from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+    def fetch_resource(message_id: str, file_key: str, rtype: str):
+        """Download image/audio bytes attached to a message."""
+        try:
+            req = (
+                GetMessageResourceRequest.builder()
+                .message_id(message_id)
+                .file_key(file_key)
+                .type(rtype)
+                .build()
+            )
+            resp = api.im.v1.message_resource.get(req)
+            if not resp.success():
+                print(f"[feishu] resource download failed: {resp.code} {resp.msg}")
+                return None
+            data = getattr(resp, "file", None)
+            if data is None:
+                return getattr(resp, "raw", None) and resp.raw.content
+            return data.read() if hasattr(data, "read") else bytes(data)
+        except Exception as e:
+            print(f"[feishu] resource download error: {e}")
+            return None
+
+    handler = build_event_handler(settings, send_reply, fetch_resource=fetch_resource)
 
     ws = lark.ws.Client(
         cfg.app_id,

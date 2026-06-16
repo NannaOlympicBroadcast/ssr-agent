@@ -60,25 +60,70 @@ class SSRAgent:
                 parts.append(f"\n## {item.title}\n{item.text[:6000]}")
         return "\n".join(parts)
 
-    def augment_with_context(self, user_message: str) -> str:
-        """Retrieve top context for the request and prepend it to the message."""
+    def _retrieved_context_text(self, user_message: str) -> str:
+        """Return a ``<retrieved_context>`` block for the request, or ''."""
         try:
             results = self.retriever.search(user_message, mode="embedding", top_k=5)
         except Exception:
             results = []
         if not results:
-            return user_message
+            return ""
         ctx = "\n".join(f"- ({r.category}) {r.title}: {r.snippet}" for r in results)
-        return f"<retrieved_context>\n{ctx}\n</retrieved_context>\n\n{user_message}"
+        return f"<retrieved_context>\n{ctx}\n</retrieved_context>"
+
+    def augment_with_context(self, user_message: str) -> str:
+        """Retrieve top context for the request and prepend it to the message."""
+        ctx = self._retrieved_context_text(user_message)
+        return f"{ctx}\n\n{user_message}" if ctx else user_message
 
     # -------------------------------------------------------------------- run
     def run(self, user_message: str) -> str:
-        self.memory.log_turn("user", user_message)
-        message = self.augment_with_context(user_message)
+        """Run a single text turn (convenience wrapper over :meth:`run_parts`)."""
+        return self.run_parts([{"type": "text", "text": user_message}])
+
+    def run_parts(self, content_parts: list[dict]) -> str:
+        """Run one turn from mixed input parts (text / image / audio).
+
+        Each part is a dict:
+          * ``{"type": "text", "text": str}``
+          * ``{"type": "image", "mime_type": str, "data": bytes}``
+          * ``{"type": "audio", "mime_type": str, "data": bytes}``
+
+        Images and audio are passed to the (multimodal) Gemini model inline.
+        """
+        from google.genai import types
+
+        text_blob = " ".join(
+            p.get("text", "") for p in content_parts if p.get("type") == "text"
+        ).strip()
+        n_media = sum(1 for p in content_parts if p.get("type") in ("image", "audio"))
+        summary = text_blob or "[no text]"
+        if n_media:
+            summary += f"  (+{n_media} media attachment(s))"
+        self.memory.log_turn("user", summary)
+
+        gp: list = []
+        ctx = self._retrieved_context_text(text_blob) if text_blob else ""
+        if ctx:
+            gp.append(types.Part(text=ctx))
+        for p in content_parts:
+            t = p.get("type")
+            if t == "text" and p.get("text"):
+                gp.append(types.Part(text=p["text"]))
+            elif t in ("image", "audio") and p.get("data"):
+                mime = p.get("mime_type") or ("image/png" if t == "image" else "audio/wav")
+                gp.append(types.Part.from_bytes(data=p["data"], mime_type=mime))
+        if not gp:
+            gp.append(types.Part(text=text_blob))
+
+        self._history.append(types.Content(role="user", parts=gp))
         try:
-            reply = self._run_genai(message)
+            reply = self._complete(
+                self._history, self.system_instruction(), self.toolkit, max_iters=24, tag="ssr"
+            )
         except Exception as e:
             reply = f"[agent error] {e}"
+        self._history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
         self.memory.log_turn("assistant", reply)
         return reply
 
@@ -97,20 +142,6 @@ class SSRAgent:
             self.on_event({"type": kind, "agent": tag, **fields})
         except Exception:
             pass  # never let UI rendering break the agent loop
-
-    def _run_genai(self, message: str) -> str:
-        from google.genai import types
-
-        self._history.append(types.Content(role="user", parts=[types.Part(text=message)]))
-        reply = self._complete(
-            self._history,
-            self.system_instruction(),
-            self.toolkit,
-            max_iters=24,
-            tag="ssr",
-        )
-        self._history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
-        return reply
 
     def _complete(
         self, contents, system_instruction, toolkit: ToolKit, max_iters: int, tag: str = "ssr"

@@ -73,6 +73,42 @@ def test_retriever_classic_and_embedding(settings: Settings):
     assert emb  # returns something
 
 
+def test_acp_extract_parts_multimodal():
+    import base64
+
+    from ssr.integrations.acp import _extract_parts
+
+    raw = b"\x89PNG-bytes"
+    blocks = [
+        {"type": "text", "text": "hi"},
+        {"type": "image", "mimeType": "image/png", "data": base64.b64encode(raw).decode()},
+        {"type": "audio", "mimeType": "audio/wav", "data": base64.b64encode(raw).decode()},
+    ]
+    parts = _extract_parts(blocks)
+    kinds = [p["type"] for p in parts]
+    assert kinds == ["text", "image", "audio"]
+    assert parts[1]["data"] == raw and parts[1]["mime_type"] == "image/png"
+    assert parts[2]["data"] == raw
+
+
+def test_feishu_build_parts():
+    from ssr.integrations import feishu
+
+    class M:
+        def __init__(self, mt, c):
+            self.message_type, self.content, self.message_id = mt, c, "om1"
+
+    # text
+    assert feishu._build_parts(M("text", '{"text":"你好"}'), None)[0]["text"] == "你好"
+    # image without a downloader → text placeholder; with one → image bytes
+    assert feishu._build_parts(M("image", '{"image_key":"img"}'), None)[0]["type"] == "text"
+    got = feishu._build_parts(M("image", '{"image_key":"img"}'), lambda *a: b"PNG")
+    assert got[0]["type"] == "image" and got[0]["data"] == b"PNG"
+    # audio with downloader → audio bytes
+    got = feishu._build_parts(M("audio", '{"file_key":"f"}'), lambda *a: b"OGG")
+    assert got[0]["type"] == "audio" and got[0]["data"] == b"OGG"
+
+
 def test_build_pool_smoke(settings: Settings):
     install_builtin_skills(settings.skills_dir)
     (settings.home / "soul.md").write_text("be kind\n", "utf-8")

@@ -13,6 +13,7 @@ HELP = {
     "/index": "(Re)build the model2vec context index. Usage: /index [category]",
     "/status": "Show index status and context-pool summary",
     "/context": "Search the context pool. Usage: /context <mode> <query>",
+    "/attach": "Send an image/audio file: /attach <path> [prompt]  (aliases /image /audio)",
     "/skills": "List discovered skills",
     "/memory": "Show MEMORY (project + global)",
     "/plan": "Show the agent's current plan",
@@ -58,6 +59,9 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
             for r in results:
                 console.print(r.render())
 
+    elif cmd in ("/attach", "/image", "/audio"):
+        _handle_attach(cmd, args, agent, console)
+
     elif cmd == "/skills":
         skills = agent.retriever.pool().by_category("skills")
         if not skills:
@@ -82,6 +86,39 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
         console.print(f"[red]Unknown command:[/red] {cmd}. Try /help")
 
     return True
+
+
+def _handle_attach(cmd: str, args: list[str], agent: SSRAgent, console: Console) -> None:
+    """`/attach <path> [prompt]` — send an image or audio file to the agent."""
+    import mimetypes
+    from pathlib import Path
+
+    if not args:
+        console.print("[yellow]Usage: /attach <path> [prompt]   (aliases: /image, /audio)[/yellow]")
+        return
+    path = Path(args[0]).expanduser()
+    prompt = " ".join(args[1:])
+    if not path.exists():
+        console.print(f"[red]No such file:[/red] {path}")
+        return
+    mime, _ = mimetypes.guess_type(str(path))
+    if mime and mime.startswith("image/"):
+        kind = "image"
+    elif mime and mime.startswith("audio/"):
+        kind = "audio"
+    else:  # fall back to the command name
+        kind = "audio" if cmd == "/audio" else "image"
+        mime = mime or ("audio/wav" if kind == "audio" else "image/png")
+    data = path.read_bytes()
+    parts: list[dict] = []
+    if prompt:
+        parts.append({"type": "text", "text": prompt})
+    parts.append({"type": kind, "mime_type": mime, "data": data})
+    console.print(
+        f"[dim magenta]thinking… (attached {kind} {path.name}, {len(data)} bytes, {mime})[/dim magenta]"
+    )
+    reply = agent.run_parts(parts)
+    console.print(f"\n[bold green]ssr ▸[/bold green] {reply}\n")
 
 
 def _print_status(agent: SSRAgent, console: Console) -> None:

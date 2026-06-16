@@ -77,8 +77,16 @@ ssr feishu serve         # opens an outbound WS to Feishu and serves the agent
 ```
 
 ### Slash commands (inside the TUI)
-`/help` `/index [category]` `/status` `/context <mode> <query>` `/skills`
-`/memory` `/plan` `/clear` `/quit`
+`/help` `/index [category]` `/status` `/context <mode> <query>`
+`/attach <path> [prompt]` (image/audio input; aliases `/image` `/audio`)
+`/skills` `/memory` `/plan` `/clear` `/quit`
+
+### Multimodal input (image + voice)
+Gemini is multimodal, so SSR accepts images and audio:
+- **TUI**: `/attach ./diagram.png explain this chart` or `/audio ./note.ogg`
+- **ACP**: `session/prompt` accepts `image` / `audio` content blocks
+  (advertised via `promptCapabilities`).
+- **Feishu/Lark**: image and voice messages are downloaded and passed to the model.
 
 ## Design
 
