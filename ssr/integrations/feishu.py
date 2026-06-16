@@ -23,20 +23,43 @@ from pathlib import Path
 from ..config import Settings
 
 _INSTALL_HINT = (
-    "Feishu long-connection support needs the lark-oapi SDK, which is not "
-    "installed.\n  Install it with:  pip install lark-oapi\n"
-    "  (or:  pip install 'ssr-agent[feishu]')"
+    "Feishu long-connection support needs the lark-oapi SDK (now a core "
+    "dependency of ssr-agent), but it could not be imported.\n"
+    "  Reinstall ssr-agent:  pip install -e .   (or: pip install --upgrade ssr-agent)\n"
+    "  Or install it directly:  pip install lark-oapi"
 )
 
 
 def _import_lark():
-    """Import lark-oapi, raising a friendly SystemExit if it is missing."""
+    """Import lark-oapi, raising a friendly SystemExit if it is missing.
+
+    Distinguishes "lark-oapi itself is absent" from "lark-oapi is installed but
+    one of its dependencies is missing" / a different interpreter, so the user
+    gets the real cause instead of a misleading 'not installed' message.
+    """
+    import sys
+
     try:
         import lark_oapi as lark  # noqa: F401
 
         return lark
-    except ModuleNotFoundError:
-        raise SystemExit(_INSTALL_HINT)
+    except ModuleNotFoundError as e:
+        missing = getattr(e, "name", "") or ""
+        if missing == "lark_oapi" or missing.startswith("lark_oapi"):
+            raise SystemExit(
+                f"{_INSTALL_HINT}\n\n"
+                f"  Active interpreter: {sys.executable}\n"
+                "  If you already installed it, you likely installed into a "
+                "different environment than the one running `ssr`.\n"
+                f"  Install into THIS interpreter:  {sys.executable} -m pip install lark-oapi"
+            )
+        # lark_oapi is present but a transitive dependency failed to import.
+        raise SystemExit(
+            f"lark-oapi is installed, but importing it failed: missing module "
+            f"'{missing}'.\n  Reinstall its dependencies:  "
+            f"{sys.executable} -m pip install --upgrade --force-reinstall lark-oapi\n"
+            f"  Original error: {e}"
+        )
 
 
 @dataclass
