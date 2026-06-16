@@ -28,6 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 acp = ["websockets>=12.0"]
+feishu = ["lark-oapi>=1.4"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]

@@ -131,7 +131,7 @@ def cmd_feishu(args, settings: Settings, console: Console) -> int:
     if args.feishu_action == "configure":
         feishu.configure_interactive(settings)
     elif args.feishu_action == "serve":
-        feishu.serve_fallback(settings, port=args.port)
+        feishu.serve_long_connection(settings)
     return 0
 
 
@@ -222,8 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     fei = sub.add_parser("feishu", help="configure / serve the Feishu (Lark) bot")
     fsub = fei.add_subparsers(dest="feishu_action", required=True)
     fsub.add_parser("configure")
-    fs = fsub.add_parser("serve")
-    fs.add_argument("--port", type=int, default=8848)
+    fsub.add_parser("serve", help="run the bot over a WebSocket long connection")
 
     return p
 

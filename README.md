@@ -35,8 +35,11 @@ ssr
    the agent call `reindex_context`. The agent's `search_context` tool chooses the
    **category**, **keyword**, and **mode** (`classic` grep / `embedding`).
 4. **Background tasks via pm2** — schedule recurring agent jobs at runtime; or
-   trigger from a **Feishu/Lark bot** via the [Vercel Chat SDK Lark adapter](https://chat-sdk.dev/adapters/vendor-official/lark)
-   (interactive setup of working dir, session id, ak & sk).
+   trigger from a **Feishu/Lark bot** over a **WebSocket long connection**
+   (`lark-oapi` `lark.ws.Client`, the same WS-only transport as the
+   [Vercel Chat SDK Lark adapter](https://chat-sdk.dev/adapters/vendor-official/lark)) —
+   no public webhook URL needed; interactive setup of working dir, session id,
+   ak & sk.
 5. **ACP interface** — `ssr --experimental-acp` speaks the
    [Agent Client Protocol](https://agentclientprotocol.com).
 6. **Built-in skills** installed to `~/.ssr/skills`:
@@ -68,9 +71,9 @@ ssr --experimental-acp   # run as an ACP server
 # background tasks (pm2)
 ssr task create nightly "summarise today's git log" --cron "0 22 * * *"
 
-# Feishu / Lark bot
-ssr feishu configure
-ssr feishu serve
+# Feishu / Lark bot (WebSocket long connection — no webhook URL)
+ssr feishu configure     # set working dir, session id, app id (ak), app secret (sk)
+ssr feishu serve         # opens an outbound WS to Feishu and serves the agent
 ```
 
 ### Slash commands (inside the TUI)
