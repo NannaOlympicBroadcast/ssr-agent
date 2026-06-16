@@ -23,7 +23,11 @@ class ACPServer:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.sessions: dict[str, object] = {}
+        # Bind to the *real* stdout, then redirect the process-wide stdout to
+        # stderr so any stray library prints (model2vec, genai, etc.) during a
+        # session never corrupt the JSON-RPC stream.
         self._out = sys.stdout
+        sys.stdout = sys.stderr
 
     # --- framing -----------------------------------------------------------
     def _send(self, obj: dict) -> None:

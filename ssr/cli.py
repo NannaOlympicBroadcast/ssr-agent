@@ -238,11 +238,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     settings = load_settings(args.cwd)
-    _first_run_setup(settings, console)
 
     if args.experimental_acp:
+        # ACP speaks pure JSON-RPC 2.0 on stdout — keep stdout clean and route
+        # all setup/diagnostic output to stderr so the protocol isn't corrupted.
+        _first_run_setup(settings, Console(stderr=True))
         return cmd_acp(settings)
 
+    _first_run_setup(settings, console)
     if args.command == "init":
         return cmd_init(args, settings, console)
     if args.command == "ask":
