@@ -8,6 +8,10 @@ JSON-RPC, exactly as the MCP stdio transport specifies.
 import json
 import sys
 
+# Force output to utf-8
+sys.stdin.reconfigure(encoding='utf-8')
+sys.stdout.reconfigure(encoding='utf-8')
+
 TOOLS = [
     {
         "name": "echo",
@@ -31,7 +35,7 @@ TOOLS = [
 
 
 def _send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
 

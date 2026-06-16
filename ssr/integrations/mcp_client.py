@@ -125,8 +125,8 @@ class MCPServer:
                 stderr=subprocess.PIPE,
                 cwd=self.cwd,
                 env=full_env,
-                text=True,
-                bufsize=1,  # line-buffered
+                # Force binary mode for stdout/stderr to avoid encoding errors
+                bufsize=1,
             )
         except (OSError, ValueError) as e:
             raise MCPError(f"failed to spawn MCP server '{self.name}': {e}") from e
@@ -210,13 +210,19 @@ class MCPServer:
         proc = self._proc
         assert proc is not None and proc.stdout is not None
         for line in proc.stdout:
-            line = line.strip()
-            if not line:
+            # Handle binary lines
+            try:
+                line_str = line.decode('utf-8').strip()
+            except UnicodeDecodeError:
+                _LOGGER.debug("mcp[%s] decode error, skipping line", self.name)
+                continue
+
+            if not line_str:
                 continue
             try:
-                msg = json.loads(line)
+                msg = json.loads(line_str)
             except json.JSONDecodeError:
-                _LOGGER.debug("mcp[%s] non-JSON line: %s", self.name, line[:200])
+                _LOGGER.debug("mcp[%s] non-JSON line: %s", self.name, line_str[:200])
                 continue
             mid = msg.get("id")
             if mid is None:
@@ -236,13 +242,17 @@ class MCPServer:
         if proc is None or proc.stderr is None:
             return
         for line in proc.stderr:
-            _LOGGER.debug("mcp[%s] stderr: %s", self.name, line.rstrip())
+            try:
+                _LOGGER.debug("mcp[%s] stderr: %s", self.name, line.decode('utf-8', errors='replace').rstrip())
+            except Exception:
+                pass
 
     def _send(self, payload: dict) -> None:
         proc = self._proc
         if proc is None or proc.stdin is None or proc.poll() is not None:
             raise MCPError(f"MCP server '{self.name}' is not available")
-        data = json.dumps(payload, ensure_ascii=False) + "\n"
+        # Ensure encoding to bytes for stdin
+        data = (json.dumps(payload, ensure_ascii=False) + "\n").encode('utf-8')
         try:
             proc.stdin.write(data)
             proc.stdin.flush()

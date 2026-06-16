@@ -8,7 +8,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "==> Installing ssr-agent (Python)…"
 if command -v uv >/dev/null 2>&1; then
-  uv pip install -e "$here"
+  uv pip install -e "$here" --system
 else
   python3 -m pip install -e "$here"
 fi
