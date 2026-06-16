@@ -127,6 +127,8 @@ class MCPServer:
                 env=full_env,
                 # Force binary mode for stdout/stderr to avoid encoding errors
                 bufsize=1,
+                # Ensure we handle text encoding explicitly if needed, 
+                # but reading bytes is safer for JSON-RPC lines
             )
         except (OSError, ValueError) as e:
             raise MCPError(f"failed to spawn MCP server '{self.name}': {e}") from e
@@ -212,8 +214,8 @@ class MCPServer:
         for line in proc.stdout:
             # Handle binary lines
             try:
-                line_str = line.decode('utf-8').strip()
-            except UnicodeDecodeError:
+                line_str = line.decode('utf-8', errors='replace').strip()
+            except Exception:
                 _LOGGER.debug("mcp[%s] decode error, skipping line", self.name)
                 continue
 

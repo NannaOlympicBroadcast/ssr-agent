@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,17 +59,20 @@ def create_task(settings: Settings, task: BackgroundTask) -> str:
             "pm2 not found on PATH — install with `npm i -g pm2` to run it."
         )
 
+    # Use python -m ssr to ensure the module is found correctly in Windows
     cmd = [
-        "pm2", "start", "ssr",
+        "pm2", "start", sys.executable,
         "--name", f"ssr-task-{task.name}",
         "--no-autorestart",
         "--",
+        "-m", "ssr",
         "task-run", "--task", task.name,
     ]
     if task.cron:
         cmd[3:3] = ["--cron-restart", task.cron]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        # shell=True is often required on Windows for pm2 commands
+        subprocess.run(cmd, check=True, capture_output=True, text=True, shell=True)
         return f"pm2 task 'ssr-task-{task.name}' started" + (f" (cron: {task.cron})" if task.cron else "")
     except subprocess.CalledProcessError as e:
         return f"ERROR starting pm2 task: {e.stderr or e}"
@@ -83,7 +87,7 @@ def delete_task(settings: Settings, name: str) -> str:
     tasks.pop(name, None)
     _save_tasks(settings, tasks)
     if pm2_available():
-        subprocess.run(["pm2", "delete", f"ssr-task-{name}"], capture_output=True, text=True)
+        subprocess.run(["pm2", "delete", f"ssr-task-{name}"], shell=True, capture_output=True, text=True)
     return f"Task '{name}' removed."
 
 
