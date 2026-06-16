@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..config import Settings
 from ..context_pool.retrieval import Retriever
+from ..integrations.mcp_client import MCPManager, MCPTool, is_mcp_tool_name
 from .memory import MemoryStore
 from .tools import ToolKit
 
@@ -36,7 +37,16 @@ class SSRAgent:
     def __init__(self, settings: Settings, on_event=None):
         self.settings = settings
         self.on_event = on_event  # optional callback(event: dict) for TUI streaming
-        self.mcp_tool_specs = _load_mcp_specs(settings.mcp_config)
+        # Spawn the MCP servers declared in ~/.ssr/mcp.json and enumerate their
+        # tools. Failures are isolated per-server (the agent still runs).
+        self.mcp_manager = _start_mcp_manager(settings.mcp_config)
+        self.mcp_tools = self.mcp_manager.tools
+        # Per-tool specs seed the 'tools' context category (so MCP tools are
+        # retrievable); fall back to server-level specs if nothing started.
+        self.mcp_tool_specs = (
+            [_mcp_tool_spec(t) for t in self.mcp_tools]
+            or _load_mcp_specs(settings.mcp_config)
+        )
         self.retriever = Retriever(settings, tool_specs=None)
         self.memory = MemoryStore(settings)
         self.toolkit = ToolKit(
@@ -49,6 +59,20 @@ class SSRAgent:
         self.retriever.tool_specs = self.toolkit.specs() + self.mcp_tool_specs
         self._client = None  # retained so its HTTP transport isn't GC-closed
         self._history = []  # running conversation Contents (multi-turn memory)
+        self._mcp_tools_param = None  # cached genai Tool for the MCP declarations
+
+    def close(self) -> None:
+        """Tear down all managed MCP server subprocesses."""
+        manager = getattr(self, "mcp_manager", None)
+        if manager is not None:
+            manager.shutdown()
+
+    def __del__(self):  # best-effort; atexit in MCPManager is the real safety net
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
     # ----------------------------------------------------------- instructions
     def system_instruction(self) -> str:
@@ -143,6 +167,42 @@ class SSRAgent:
         except Exception:
             pass  # never let UI rendering break the agent loop
 
+    def _mcp_tools_parameter(self):
+        """Build (once) a genai ``Tool`` of function declarations for MCP tools.
+
+        Returns ``None`` when there are no MCP tools, so the config is unchanged
+        for users without any configured servers.
+        """
+        if not self.mcp_tools:
+            return None
+        if self._mcp_tools_param is not None:
+            return self._mcp_tools_param
+        from google.genai import types
+
+        declarations = []
+        for tool in self.mcp_tools:
+            schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
+            if schema.get("type") != "object":
+                schema = {"type": "object", "properties": {}}
+            try:
+                declarations.append(
+                    types.FunctionDeclaration(
+                        name=tool.qualified_name,
+                        description=tool.description or f"MCP tool {tool.name}",
+                        parameters_json_schema=schema,
+                    )
+                )
+            except Exception:  # a malformed schema must not break the whole loop
+                declarations.append(
+                    types.FunctionDeclaration(
+                        name=tool.qualified_name,
+                        description=tool.description or f"MCP tool {tool.name}",
+                        parameters_json_schema={"type": "object", "properties": {}},
+                    )
+                )
+        self._mcp_tools_param = types.Tool(function_declarations=declarations)
+        return self._mcp_tools_param
+
     def _complete(
         self, contents, system_instruction, toolkit: ToolKit, max_iters: int, tag: str = "ssr"
     ) -> str:
@@ -160,9 +220,14 @@ class SSRAgent:
 
         client = self._ensure_client()
         dispatch = {fn.__name__: fn for fn in toolkit.callables()}
+        # Builtin Python callables + a Tool carrying the MCP function declarations.
+        tools = list(toolkit.callables())
+        mcp_param = self._mcp_tools_parameter()
+        if mcp_param is not None:
+            tools.append(mcp_param)
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
-            tools=toolkit.callables(),
+            tools=tools,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
 
@@ -189,7 +254,13 @@ class SSRAgent:
                 fn = dispatch.get(call.name)
                 args = dict(call.args or {})
                 self._emit("tool_call", tag=tag, name=call.name, args=args)
-                if fn is None:
+                if is_mcp_tool_name(call.name):
+                    # Route MCP tool calls to the managed server subprocess.
+                    try:
+                        result = self.mcp_manager.call_tool(call.name, args)
+                    except Exception as e:
+                        result = f"ERROR: {type(e).__name__}: {e}"
+                elif fn is None:
                     result = f"ERROR: unknown tool {call.name}"
                 else:
                     try:
@@ -240,8 +311,36 @@ class SSRAgent:
         )
 
 
+def _start_mcp_manager(mcp_path: Path) -> MCPManager:
+    """Build an :class:`MCPManager` from the config and start its servers.
+
+    Never raises: if anything goes wrong an empty (no-op) manager is returned so
+    the agent keeps working without MCP.
+    """
+    try:
+        manager = MCPManager.from_config(mcp_path)
+        manager.start_all()
+        return manager
+    except Exception:  # pragma: no cover - defensive
+        return MCPManager([])
+
+
+def _mcp_tool_spec(tool: MCPTool) -> dict:
+    """Context-pool spec for a single MCP tool (seeds the 'tools' category)."""
+    return {
+        "name": tool.qualified_name,
+        "description": tool.description or f"MCP tool {tool.name}",
+        "origin": "mcp",
+        "server": tool.server,
+    }
+
+
 def _load_mcp_specs(mcp_path: Path) -> list[dict]:
-    """Read ~/.ssr/mcp.json and return tool specs for the context pool."""
+    """Read ~/.ssr/mcp.json and return server-level specs for the context pool.
+
+    Used as a fallback for the context pool when no MCP server tools could be
+    enumerated (e.g. servers disabled or failed to start).
+    """
     if not mcp_path.exists():
         return []
     try:
