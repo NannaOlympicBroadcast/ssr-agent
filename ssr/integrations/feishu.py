@@ -22,6 +22,22 @@ from pathlib import Path
 
 from ..config import Settings
 
+_INSTALL_HINT = (
+    "Feishu long-connection support needs the lark-oapi SDK, which is not "
+    "installed.\n  Install it with:  pip install lark-oapi\n"
+    "  (or:  pip install 'ssr-agent[feishu]')"
+)
+
+
+def _import_lark():
+    """Import lark-oapi, raising a friendly SystemExit if it is missing."""
+    try:
+        import lark_oapi as lark  # noqa: F401
+
+        return lark
+    except ModuleNotFoundError:
+        raise SystemExit(_INSTALL_HINT)
+
 
 @dataclass
 class FeishuConfig:
@@ -163,7 +179,7 @@ def build_event_handler(settings: Settings, send_reply):
     """
     import threading
 
-    import lark_oapi as lark
+    lark = _import_lark()
     from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
     from ..agent.core import SSRAgent
@@ -207,7 +223,7 @@ def serve_long_connection(settings: Settings) -> None:
     """Run the Feishu bot over a WebSocket long connection (no webhook URL)."""
     import json as _json
 
-    import lark_oapi as lark
+    lark = _import_lark()
     from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
     cfg = load_config(settings)
