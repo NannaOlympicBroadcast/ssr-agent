@@ -18,7 +18,9 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr/skills/` — skill discovery across `~/.agent`, `~/.codex`, `~/.gemini`,
   `~/.claude`, `~/.ssr` + built-in skill installer.
 - `ssr/integrations/` — `pm2` background tasks, `feishu` (Lark) bot, `acp`
-  (Agent Client Protocol) server.
+  (Agent Client Protocol) server, `mcp_client` (spawns the MCP servers in
+  `~/.ssr/mcp.json` and speaks JSON-RPC over stdio; tools are exposed to the
+  model as `mcp__<server>__<tool>` and routed by `SSRAgent`).
 
 ## Conventions
 - Keep tools as plain typed functions with docstrings (ADK auto-wraps them).
