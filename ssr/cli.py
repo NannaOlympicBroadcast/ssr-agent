@@ -17,7 +17,7 @@ ENV_TEMPLATE = """\
 # Required:
 GEMINI_API_KEY=
 TAVILY_API_KEY=
-DEFAULT_MODEL=gemini-3-flash-lite
+DEFAULT_MODEL=gemini-3.1-flash-lite
 """
 
 MCP_TEMPLATE = """\

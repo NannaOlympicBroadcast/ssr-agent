@@ -6,7 +6,7 @@ exposes a single :class:`Settings` object used throughout the system.
 Required env (configured in ``~/.ssr/.env``):
     GEMINI_API_KEY   API key for the Gemini model.
     TAVILY_API_KEY   API key for Tavily web search.
-    DEFAULT_MODEL    Model id, defaults to ``gemini-3-flash-lite``.
+    DEFAULT_MODEL    Model id, defaults to ``gemini-3.1-flash-lite``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover
         return False
 
 
-DEFAULT_MODEL_FALLBACK = "gemini-3-flash-lite"
+DEFAULT_MODEL_FALLBACK = "gemini-3.1-flash-lite"
 
 # The set of skill source directories the system scans, in priority order.
 SKILL_DIRS = (

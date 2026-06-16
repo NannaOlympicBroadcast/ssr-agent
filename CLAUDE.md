@@ -1,7 +1,7 @@
 # SSR Agent — project guide
 
 SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
-**Gemini** (`gemini-3-flash-lite` by default). This file is loaded into the
+**Gemini** (`gemini-3.1-flash-lite` by default). This file is loaded into the
 `configurations` context category at startup (it is `claude.md`-compatible).
 
 ## Architecture

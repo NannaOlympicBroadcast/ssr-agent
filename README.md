@@ -54,7 +54,7 @@ Configure `~/.ssr/.env`:
 ```dotenv
 GEMINI_API_KEY=...
 TAVILY_API_KEY=...
-DEFAULT_MODEL=gemini-3-flash-lite
+DEFAULT_MODEL=gemini-3.1-flash-lite
 ```
 
 ## Usage
@@ -79,7 +79,7 @@ ssr feishu serve
 
 ## Design
 
-- **Model**: Gemini `gemini-3-flash-lite` (override with `DEFAULT_MODEL`).
+- **Model**: Gemini `gemini-3.1-flash-lite` (override with `DEFAULT_MODEL`).
 - **Framework**: Google ADK `LlmAgent` + tools; a `google-genai`
   automatic-function-calling loop is used as a runtime fallback.
 - See [`CLAUDE.md`](./CLAUDE.md) for the module map.

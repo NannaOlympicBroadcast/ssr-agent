@@ -46,7 +46,8 @@ class SSRAgent:
         )
         # Seed the 'tools' context category with builtin + MCP tool specs.
         self.retriever.tool_specs = self.toolkit.specs() + self.mcp_tool_specs
-        self._chat = None  # lazy genai chat session
+        self._client = None  # retained so its HTTP transport isn't GC-closed
+        self._history = []  # running conversation Contents (multi-turn memory)
 
     # ----------------------------------------------------------- instructions
     def system_instruction(self) -> str:
@@ -80,51 +81,92 @@ class SSRAgent:
         self.memory.log_turn("assistant", reply)
         return reply
 
-    def _ensure_chat(self):
-        if self._chat is not None:
-            return self._chat
-        from google import genai
-        from google.genai import types
+    def _ensure_client(self):
+        if self._client is None:
+            from google import genai
 
-        client = genai.Client(api_key=self.settings.gemini_api_key)
-        config = types.GenerateContentConfig(
-            system_instruction=self.system_instruction(),
-            tools=self.toolkit.callables(),
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                maximum_remote_calls=24
-            ),
-        )
-        self._chat = client.chats.create(model=self.settings.default_model, config=config)
-        return self._chat
+            self._client = genai.Client(api_key=self.settings.gemini_api_key)
+        return self._client
 
     def _run_genai(self, message: str) -> str:
-        chat = self._ensure_chat()
-        resp = chat.send_message(message)
-        return (getattr(resp, "text", None) or "").strip() or "(no response)"
+        from google.genai import types
+
+        self._history.append(types.Content(role="user", parts=[types.Part(text=message)]))
+        reply = self._complete(
+            self._history,
+            self.system_instruction(),
+            self.toolkit,
+            max_iters=24,
+        )
+        self._history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
+        return reply
+
+    def _complete(self, contents, system_instruction, toolkit: ToolKit, max_iters: int) -> str:
+        """Manual function-calling loop.
+
+        google-genai's *automatic* function calling does not invoke bound
+        methods, so we drive the tool loop ourselves: the SDK still auto-builds
+        the function schemas from the typed callables, and we dispatch each
+        ``function_call`` to the matching :class:`ToolKit` method.
+        """
+        from google.genai import types
+
+        client = self._ensure_client()
+        dispatch = {fn.__name__: fn for fn in toolkit.callables()}
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            tools=toolkit.callables(),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
+
+        for _ in range(max_iters):
+            resp = client.models.generate_content(
+                model=self.settings.default_model, contents=contents, config=config
+            )
+            candidate = (resp.candidates or [None])[0]
+            if candidate is None or candidate.content is None:
+                return (getattr(resp, "text", None) or "(no response)").strip()
+            parts = candidate.content.parts or []
+            calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
+            contents.append(candidate.content)
+            if not calls:
+                text = " ".join(p.text for p in parts if getattr(p, "text", None)).strip()
+                return text or "(no response)"
+            fr_parts = []
+            for call in calls:
+                fn = dispatch.get(call.name)
+                args = dict(call.args or {})
+                if fn is None:
+                    result = f"ERROR: unknown tool {call.name}"
+                else:
+                    try:
+                        result = fn(**args)
+                    except Exception as e:  # surface tool errors back to the model
+                        result = f"ERROR: {type(e).__name__}: {e}"
+                fr_parts.append(
+                    types.Part.from_function_response(
+                        name=call.name, response={"result": str(result)}
+                    )
+                )
+            contents.append(types.Content(role="tool", parts=fr_parts))
+        return "(reached tool-call limit without a final answer)"
 
     # ------------------------------------------------------------- sub agents
     def _run_sub_agent(self, task: str, context: str = "") -> str:
         """Run a fresh, isolated sub-agent for a focused subtask."""
-        try:
-            from google import genai
-            from google.genai import types
+        from google.genai import types
 
-            client = genai.Client(api_key=self.settings.gemini_api_key)
+        try:
             sub_toolkit = ToolKit(self.settings, self.retriever, self.memory, sub_agent_runner=None)
-            config = types.GenerateContentConfig(
-                system_instruction=(
-                    "You are an SSR sub-agent handling one focused subtask. "
-                    "Complete it fully and report a concise result."
-                ),
-                tools=sub_toolkit.callables(),
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    maximum_remote_calls=12
-                ),
-            )
-            chat = client.chats.create(model=self.settings.default_model, config=config)
             prompt = task if not context else f"Context:\n{context}\n\nTask:\n{task}"
-            resp = chat.send_message(prompt)
-            return (getattr(resp, "text", None) or "(sub-agent produced no output)").strip()
+            contents = [types.Content(role="user", parts=[types.Part(text=prompt)])]
+            return self._complete(
+                contents,
+                "You are an SSR sub-agent handling one focused subtask. "
+                "Complete it fully and report a concise result.",
+                sub_toolkit,
+                max_iters=12,
+            )
         except Exception as e:
             return f"[sub-agent error] {e}"
 

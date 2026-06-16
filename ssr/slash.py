@@ -75,7 +75,7 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
         console.print(agent.toolkit.get_plan())
 
     elif cmd == "/clear":
-        agent._chat = None
+        agent._history.clear()
         console.print("[green]Session cleared.[/green]")
 
     else:
