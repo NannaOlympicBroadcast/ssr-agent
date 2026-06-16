@@ -33,8 +33,9 @@ Be concise. Show your reasoning through the plan and tool calls, not verbosity.
 
 
 class SSRAgent:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, on_event=None):
         self.settings = settings
+        self.on_event = on_event  # optional callback(event: dict) for TUI streaming
         self.mcp_tool_specs = _load_mcp_specs(settings.mcp_config)
         self.retriever = Retriever(settings, tool_specs=None)
         self.memory = MemoryStore(settings)
@@ -88,6 +89,15 @@ class SSRAgent:
             self._client = genai.Client(api_key=self.settings.gemini_api_key)
         return self._client
 
+    def _emit(self, kind: str, tag: str = "ssr", **fields) -> None:
+        """Push a streaming event to the TUI callback, if one is registered."""
+        if self.on_event is None:
+            return
+        try:
+            self.on_event({"type": kind, "agent": tag, **fields})
+        except Exception:
+            pass  # never let UI rendering break the agent loop
+
     def _run_genai(self, message: str) -> str:
         from google.genai import types
 
@@ -97,17 +107,23 @@ class SSRAgent:
             self.system_instruction(),
             self.toolkit,
             max_iters=24,
+            tag="ssr",
         )
         self._history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
         return reply
 
-    def _complete(self, contents, system_instruction, toolkit: ToolKit, max_iters: int) -> str:
+    def _complete(
+        self, contents, system_instruction, toolkit: ToolKit, max_iters: int, tag: str = "ssr"
+    ) -> str:
         """Manual function-calling loop.
 
         google-genai's *automatic* function calling does not invoke bound
         methods, so we drive the tool loop ourselves: the SDK still auto-builds
         the function schemas from the typed callables, and we dispatch each
         ``function_call`` to the matching :class:`ToolKit` method.
+
+        Intermediate reasoning text and every tool call/result are streamed to
+        the TUI via :meth:`_emit` so the user sees the agent think and act.
         """
         from google.genai import types
 
@@ -128,14 +144,20 @@ class SSRAgent:
                 return (getattr(resp, "text", None) or "(no response)").strip()
             parts = candidate.content.parts or []
             calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
+            text = " ".join(p.text for p in parts if getattr(p, "text", None)).strip()
             contents.append(candidate.content)
             if not calls:
-                text = " ".join(p.text for p in parts if getattr(p, "text", None)).strip()
-                return text or "(no response)"
+                if text:
+                    return text
+                return "(no response)"
+            # Reasoning the model emitted alongside its tool calls.
+            if text:
+                self._emit("thinking", tag=tag, text=text)
             fr_parts = []
             for call in calls:
                 fn = dispatch.get(call.name)
                 args = dict(call.args or {})
+                self._emit("tool_call", tag=tag, name=call.name, args=args)
                 if fn is None:
                     result = f"ERROR: unknown tool {call.name}"
                 else:
@@ -143,6 +165,7 @@ class SSRAgent:
                         result = fn(**args)
                     except Exception as e:  # surface tool errors back to the model
                         result = f"ERROR: {type(e).__name__}: {e}"
+                self._emit("tool_result", tag=tag, name=call.name, result=str(result))
                 fr_parts.append(
                     types.Part.from_function_response(
                         name=call.name, response={"result": str(result)}
@@ -160,11 +183,13 @@ class SSRAgent:
             sub_toolkit = ToolKit(self.settings, self.retriever, self.memory, sub_agent_runner=None)
             prompt = task if not context else f"Context:\n{context}\n\nTask:\n{task}"
             contents = [types.Content(role="user", parts=[types.Part(text=prompt)])]
+            self._emit("sub_agent", tag="sub", task=task)
             return self._complete(
                 contents,
                 "You are an SSR sub-agent handling one focused subtask. "
                 "Complete it fully and report a concise result.",
                 sub_toolkit,
+                tag="sub",
                 max_iters=12,
             )
         except Exception as e:

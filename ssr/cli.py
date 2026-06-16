@@ -6,11 +6,41 @@ import argparse
 import sys
 
 from rich.console import Console
+from rich.markup import escape
 
 from . import __version__
 from .banner import render_banner
 from .config import Settings, load_settings, missing_required
 from .skills.manager import install_builtin_skills
+
+
+def _short(val, limit: int = 120) -> str:
+    """One-line, length-capped, markup-safe rendering of a tool arg/result."""
+    s = str(val).replace("\n", " ⏎ ")
+    s = s[:limit] + ("…" if len(s) > limit else "")
+    return escape(s)
+
+
+def make_event_renderer(console: Console):
+    """Return an on_event callback that prints agent thinking + tool activity."""
+
+    def render(ev: dict) -> None:
+        typ = ev.get("type")
+        pad = "    " if ev.get("agent") == "sub" else ""
+        if typ == "thinking":
+            console.print(f"{pad}[dim italic]💭 {_short(ev.get('text', ''), 400)}[/dim italic]")
+        elif typ == "sub_agent":
+            console.print(f"[magenta]🤖 sub-agent[/magenta] [dim]{_short(ev.get('task', ''), 120)}[/dim]")
+        elif typ == "tool_call":
+            args = ev.get("args") or {}
+            argstr = ", ".join(f"{k}={_short(v, 60)}" for k, v in args.items())
+            console.print(f"{pad}[yellow]🔧 {escape(str(ev.get('name', '')))}[/yellow][dim]({argstr})[/dim]")
+        elif typ == "tool_result":
+            res = ev.get("result", "")
+            style = "red" if str(res).startswith("ERROR") else "green"
+            console.print(f"{pad}[dim]   ↳[/dim] [{style}]{_short(res, 200)}[/{style}]")
+
+    return render
 
 ENV_TEMPLATE = """\
 # SSR Agent configuration (~/.ssr/.env)
@@ -126,7 +156,7 @@ def repl(settings: Settings, console: Console) -> int:
     )
     console.print("[dim]Type /help for commands, /quit to exit.[/dim]\n")
 
-    agent = SSRAgent(settings)
+    agent = SSRAgent(settings, on_event=make_event_renderer(console))
 
     try:
         from prompt_toolkit import PromptSession
@@ -153,9 +183,9 @@ def repl(settings: Settings, console: Console) -> int:
         if "GEMINI_API_KEY" in missing_required(settings):
             console.print("[red]GEMINI_API_KEY not set — edit ~/.ssr/.env[/red]")
             continue
-        with console.status("[magenta]thinking…[/magenta]"):
-            reply = agent.run(line)
-        console.print(f"[bold green]ssr[/bold green] ▸ {reply}\n")
+        console.print("[dim magenta]thinking…[/dim magenta]")
+        reply = agent.run(line)
+        console.print(f"\n[bold green]ssr ▸[/bold green] {reply}\n")
 
 
 def build_parser() -> argparse.ArgumentParser:
