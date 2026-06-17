@@ -14,7 +14,9 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   unified `Retriever` (classic grep + embedding search).
 - `ssr/agent/` — `SSRAgent` (ADK agent + genai fallback), `ToolKit`
   (filesystem, run_command, memory, web_search, search_context, sub-agents,
-  planning), `MemoryStore`.
+  planning), `MemoryStore`, `SessionStore` (append-only conversation transcripts
+  in `~/.ssr/sessions/<id>.jsonl`; every REPL / dispatched / chat turn is
+  recorded and is browsable via `/sessions` and over remote control).
 - `ssr/skills/` — skill discovery across `~/.agent`, `~/.codex`, `~/.gemini`,
   `~/.claude`, `~/.ssr` + built-in skill installer.
 - `ssr/integrations/` — `pm2` background tasks, `feishu` (Lark) bot, `acp`

@@ -8,6 +8,7 @@ the tools to runtime context (settings, retriever, memory).
 
 from __future__ import annotations
 
+import locale
 import subprocess
 from pathlib import Path
 
@@ -17,6 +18,31 @@ from .memory import MemoryStore
 
 _MAX_OUTPUT = 12_000
 _MAX_READ = 60_000
+
+
+def decode_output(data: bytes | None) -> str:
+    """Decode subprocess output bytes without ever raising.
+
+    Tries UTF-8, then the platform's preferred encoding (e.g. GBK on a Chinese
+    Windows console), then falls back to UTF-8 with replacement. This avoids the
+    ``UnicodeDecodeError`` that ``subprocess`` raises in text mode when command
+    output is not valid in the locale codec.
+    """
+    if not data:
+        return ""
+    encodings = ["utf-8"]
+    try:
+        preferred = locale.getpreferredencoding(False)
+        if preferred and preferred.lower() not in encodings:
+            encodings.append(preferred)
+    except Exception:
+        pass
+    for enc in (*encodings, "gbk"):
+        try:
+            return data.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="replace")
 
 
 class ToolKit:
@@ -94,17 +120,20 @@ class ToolKit:
             timeout: Maximum seconds to wait before aborting.
         """
         try:
+            # Capture raw bytes (not text=True) and decode ourselves so a command
+            # whose output isn't valid in the locale codec can't crash the reader.
             proc = subprocess.run(
                 command,
                 shell=True,
                 cwd=str(self.settings.project_dir),
                 capture_output=True,
-                text=True,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
             return f"ERROR: command timed out after {timeout}s"
-        out = (proc.stdout or "") + (("\n[stderr]\n" + proc.stderr) if proc.stderr else "")
+        stdout = decode_output(proc.stdout)
+        stderr = decode_output(proc.stderr)
+        out = stdout + (("\n[stderr]\n" + stderr) if stderr else "")
         out = out[:_MAX_OUTPUT]
         return f"exit={proc.returncode}\n{out}".strip()
 

@@ -100,6 +100,16 @@ config is saved to `~/.ssr/remote.json`. See the
 [ssr-dispatch-server](https://github.com/NannaOlympicBroadcast/ssr-dispatch-server)
 project for the server, web UI, and the `<baseurl>/mcp?key=<token>` endpoint.
 
+From the dispatch web UI you can **chat** with the agent on a node (with file &
+image attachments and a live preview of the agent's thinking and tool calls),
+and browse each node's **past sessions**.
+
+### Session recording
+
+Every conversation turn — REPL, one-shot, dispatched agent run, or web chat — is
+recorded as an append-only `~/.ssr/sessions/<id>.jsonl` transcript. List them in
+the TUI with `/sessions`; `/clear` starts a fresh session.
+
 ### Slash commands (inside the TUI)
 `/help` `/index [category]` `/status` `/context <mode> <query>`
 `/attach <path> [prompt]` (image/audio input; aliases `/image` `/audio`)

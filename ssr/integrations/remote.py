@@ -243,6 +243,7 @@ class RemoteNode:
         self.ws = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self._sessions: dict[str, PtySession] = {}
+        self._chats: dict[str, object] = {}  # chat_id -> live SSRAgent
         self._agent = None  # lazily constructed SSRAgent for agent.run
 
     # ------------------------------------------------------------- connection
@@ -334,6 +335,23 @@ class RemoteNode:
             return await asyncio.to_thread(
                 self._run_agent, params.get("prompt", ""), params.get("cwd", "")
             )
+        if method == "session.list":
+            return await asyncio.to_thread(self._session_list)
+        if method == "session.get":
+            return await asyncio.to_thread(self._session_get, params.get("session_id", ""))
+        if method == "session.delete":
+            return await asyncio.to_thread(self._session_delete, params.get("session_id", ""))
+        if method == "chat.start":
+            return await asyncio.to_thread(
+                self._chat_start, params.get("cwd", ""), params.get("resume_session_id", "")
+            )
+        if method == "chat.send":
+            return await asyncio.to_thread(
+                self._chat_send, params.get("chat_id", ""), params.get("message", ""),
+                params.get("attachments") or [],
+            )
+        if method == "chat.close":
+            return self._chat_close(params.get("chat_id", ""))
         if method == "terminal.open":
             return self._terminal_open(params.get("cwd", "~"))
         if method == "terminal.input":
@@ -403,26 +421,119 @@ class RemoteNode:
             pass
 
     # --------------------------------------------------------------- agent RPC
+    def _agent_settings(self, cwd: str) -> Settings:
+        """Settings rooted at *cwd* (falling back to this node's project dir)."""
+        if not cwd:
+            return self.settings
+        return Settings(
+            home=self.settings.home,
+            project_dir=_expand_path(cwd),
+            gemini_api_key=self.settings.gemini_api_key,
+            tavily_api_key=self.settings.tavily_api_key,
+            default_model=self.settings.default_model,
+        )
+
     def _run_agent(self, prompt: str, cwd: str) -> dict:
         from ..agent.core import SSRAgent
 
         if not prompt:
             return {"text": "ERROR: empty prompt"}
-        # A fresh agent per dispatch, rooted at the requested directory.
-        agent_settings = self.settings
-        if cwd:
-            agent_settings = Settings(
-                home=self.settings.home,
-                project_dir=_expand_path(cwd),
-                gemini_api_key=self.settings.gemini_api_key,
-                tavily_api_key=self.settings.tavily_api_key,
-                default_model=self.settings.default_model,
-            )
-        agent = SSRAgent(agent_settings)
+        agent = SSRAgent(self._agent_settings(cwd))
         try:
-            return {"text": agent.run(prompt)}
+            text = agent.run(prompt)
+            return {"text": text, "session_id": agent.session_id}
         finally:
             agent.close()
+
+    # ------------------------------------------------------------- session RPC
+    def _session_list(self) -> dict:
+        from ..agent.sessions import SessionStore
+
+        return {"sessions": SessionStore(self.settings).list()}
+
+    def _session_get(self, session_id: str) -> dict:
+        from ..agent.sessions import SessionStore
+
+        data = SessionStore(self.settings).get(session_id)
+        if data is None:
+            raise FileNotFoundError(f"no such session: {session_id}")
+        return data
+
+    def _session_delete(self, session_id: str) -> dict:
+        from ..agent.sessions import SessionStore
+
+        return {"deleted": SessionStore(self.settings).delete(session_id)}
+
+    # ---------------------------------------------------------------- chat RPC
+    def _make_chat_emitter(self, chat_id: str):
+        """Build an on_event callback that streams agent thinking/tools live.
+
+        Events are pushed on the channel named after the chat id, so the
+        dispatch server can fan them out to the watching browser in real time.
+        """
+        loop = self.loop
+
+        def emit(ev: dict) -> None:
+            if loop is None:
+                return
+            kind = ev.get("type")
+            data = ""
+            extra: dict = {}
+            if kind == "thinking":
+                data = _truncate(ev.get("text", ""))
+            elif kind == "tool_call":
+                data = ev.get("name", "")
+                extra = {"args": _shorten_args(ev.get("args") or {})}
+            elif kind == "tool_result":
+                data = _truncate(str(ev.get("result", "")))
+                extra = {"name": ev.get("name", "")}
+            elif kind == "sub_agent":
+                data = _truncate(ev.get("task", ""))
+            else:
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._send_event(chat_id, f"agent.{kind}", data, **extra), loop
+                )
+            except Exception:
+                pass
+
+        return emit
+
+    def _chat_start(self, cwd: str, resume_session_id: str = "") -> dict:
+        import uuid
+
+        from ..agent.core import SSRAgent
+
+        chat_id = uuid.uuid4().hex
+        agent = SSRAgent(self._agent_settings(cwd), on_event=self._make_chat_emitter(chat_id))
+        if resume_session_id:
+            agent.load_session(resume_session_id)
+        else:
+            agent.ensure_session("")
+        self._chats[chat_id] = agent
+        return {"chat_id": chat_id, "session_id": agent.session_id, "cwd": str(agent.settings.project_dir)}
+
+    def _chat_send(self, chat_id: str, message: str, attachments: list | None = None) -> dict:
+        agent = self._chats.get(chat_id)
+        if agent is None:
+            raise KeyError(f"unknown chat: {chat_id} (call chat.start first)")
+        attachments = attachments or []
+        if attachments:
+            parts = _build_chat_parts(agent, message, attachments)
+            reply = agent.run_parts(parts)  # records both turns into the session
+        else:
+            reply = agent.run(message)
+        return {"reply": reply, "session_id": agent.session_id}
+
+    def _chat_close(self, chat_id: str) -> dict:
+        agent = self._chats.pop(chat_id, None)
+        if agent is not None:
+            try:
+                agent.close()
+            except Exception:
+                pass
+        return {"closed": True}
 
 
 # ------------------------------------------------------------ fs RPC helpers
@@ -471,17 +582,69 @@ def _fs_write(path: str, data_b64: str) -> dict:
 
 
 def _run_command(command: str, cwd: str, timeout: int) -> dict:
+    from ..agent.tools import decode_output
+
     workdir = _expand(cwd) if cwd else os.getcwd()
     if not os.path.isdir(workdir):
         workdir = os.getcwd()
     try:
+        # Bytes mode + defensive decode so non-UTF-8/locale output never crashes.
         proc = subprocess.run(
-            command, shell=True, cwd=workdir, capture_output=True, text=True, timeout=timeout
+            command, shell=True, cwd=workdir, capture_output=True, timeout=timeout
         )
     except subprocess.TimeoutExpired:
         return {"exit": -1, "output": f"ERROR: command timed out after {timeout}s"}
-    out = (proc.stdout or "") + (("\n[stderr]\n" + proc.stderr) if proc.stderr else "")
+    stderr = decode_output(proc.stderr)
+    out = decode_output(proc.stdout) + (("\n[stderr]\n" + stderr) if stderr else "")
     return {"exit": proc.returncode, "output": out[:100_000]}
+
+
+def _truncate(text: str, limit: int = 2000) -> str:
+    text = text or ""
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _shorten_args(args: dict) -> dict:
+    out = {}
+    for k, v in (args or {}).items():
+        s = str(v)
+        out[k] = s if len(s) <= 200 else s[:200] + "…"
+    return out
+
+
+def _build_chat_parts(agent, message: str, attachments: list) -> list[dict]:
+    """Turn a chat message + attachments into agent input parts.
+
+    Every attachment is saved into the chat's working directory (so the agent can
+    open it with its filesystem tools); images are additionally passed inline to
+    the multimodal model.
+    """
+    parts: list[dict] = []
+    image_parts: list[dict] = []
+    saved: list[str] = []
+    workdir = Path(str(agent.settings.project_dir))
+    for att in attachments:
+        name = os.path.basename(att.get("name") or "upload")
+        mime = att.get("mime") or ""
+        try:
+            data = base64.b64decode(att.get("data_b64") or "")
+        except Exception:
+            continue
+        dest = workdir / name
+        try:
+            workdir.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            saved.append(str(dest))
+        except OSError:
+            pass
+        if mime.startswith("image/"):
+            image_parts.append({"type": "image", "mime_type": mime, "data": data})
+    text = message or ""
+    if saved:
+        text += "\n\n[attached files saved to the working directory: " + ", ".join(saved) + "]"
+    parts.append({"type": "text", "text": text})
+    parts.extend(image_parts)
+    return parts
 
 
 def _ssr_version() -> str:
