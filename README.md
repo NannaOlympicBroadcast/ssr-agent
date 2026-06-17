@@ -116,10 +116,21 @@ When running under EvalScope:
 2. The agent forwards its LLM completions, tool definitions, and tool execution results back to the EvalScope bridge endpoint.
 3. EvalScope intercepts and records the interaction trajectory as an `agent_trace`, which can be replayed and evaluated against benchmarks (such as GSM8K).
 
-To execute the benchmark:
+To execute the benchmark locally:
 ```bash
 python run_benchmark.py
 ```
+
+To execute the benchmark inside a Docker container (recommended for SWE-bench to avoid OS-level limitations and isolate dependencies):
+```bash
+docker run --rm \
+  -v $(pwd):/workspace \
+  -v ~/.ssr:/root/.ssr \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -w /workspace \
+  python:3.12-slim bash run_in_docker.sh
+```
+
 
 ### Session recording
 
