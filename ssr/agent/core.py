@@ -15,6 +15,7 @@ from ..config import Settings
 from ..context_pool.retrieval import Retriever
 from ..integrations.mcp_client import MCPManager, MCPTool, is_mcp_tool_name
 from .memory import MemoryStore
+from .sessions import SessionStore
 from .tools import ToolKit
 
 SYSTEM_PROMPT = """You are SSR Agent, a meticulous command-line coding agent.
@@ -49,6 +50,8 @@ class SSRAgent:
         )
         self.retriever = Retriever(settings, tool_specs=None)
         self.memory = MemoryStore(settings)
+        self.sessions = SessionStore(settings)
+        self.session_id: str | None = None  # active recording session
         self.toolkit = ToolKit(
             settings,
             self.retriever,
@@ -73,6 +76,45 @@ class SSRAgent:
         except Exception:
             pass
 
+
+    # --------------------------------------------------------------- sessions
+    def ensure_session(self, title_hint: str = "") -> str:
+        """Start a recording session if none is active; return its id."""
+        if self.session_id is None:
+            self.session_id = self.sessions.create(
+                title=title_hint, cwd=str(self.settings.project_dir)
+            )
+        return self.session_id
+
+    def new_session(self, title_hint: str = "") -> str:
+        """Force a fresh recording session (used by /clear and chat resets)."""
+        self.session_id = self.sessions.create(
+            title=title_hint, cwd=str(self.settings.project_dir)
+        )
+        return self.session_id
+
+    def load_session(self, session_id: str) -> bool:
+        """Resume a stored session: bind it for recording and rebuild history."""
+        from google.genai import types
+
+        data = self.sessions.get(session_id)
+        if data is None:
+            return False
+        self.session_id = session_id
+        self._history = []
+        for turn in data.get("turns", []):
+            role = "model" if turn.get("role") == "assistant" else "user"
+            text = turn.get("content") or ""
+            if text:
+                self._history.append(types.Content(role=role, parts=[types.Part(text=text)]))
+        return True
+
+    def _record_turn(self, role: str, content: str) -> None:
+        if self.session_id is not None:
+            try:
+                self.sessions.append(self.session_id, role, content)
+            except Exception:
+                pass  # recording must never break the agent
 
     # ----------------------------------------------------------- instructions
     def system_instruction(self) -> str:
@@ -125,6 +167,8 @@ class SSRAgent:
         if n_media:
             summary += f"  (+{n_media} media attachment(s))"
         self.memory.log_turn("user", summary)
+        self.ensure_session(summary)
+        self._record_turn("user", summary)
 
         gp: list = []
         ctx = self._retrieved_context_text(text_blob) if text_blob else ""
@@ -149,6 +193,7 @@ class SSRAgent:
             reply = f"[agent error] {e}"
         self._history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
         self.memory.log_turn("assistant", reply)
+        self._record_turn("assistant", reply)
         return reply
 
     def _ensure_client(self):

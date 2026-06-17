@@ -17,6 +17,7 @@ HELP = {
     "/skills": "List discovered skills",
     "/memory": "Show MEMORY (project + global)",
     "/plan": "Show the agent's current plan",
+    "/sessions": "List recorded conversation sessions",
     "/clear": "Reset the conversation session",
     "/quit": "Exit SSR (aliases: /exit, /q)",
 }
@@ -80,7 +81,11 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
 
     elif cmd == "/clear":
         agent._history.clear()
+        agent.session_id = None  # next turn starts a fresh recorded session
         console.print("[green]Session cleared.[/green]")
+
+    elif cmd == "/sessions":
+        _print_sessions(agent, console)
 
     else:
         console.print(f"[red]Unknown command:[/red] {cmd}. Try /help")
@@ -119,6 +124,25 @@ def _handle_attach(cmd: str, args: list[str], agent: SSRAgent, console: Console)
     )
     reply = agent.run_parts(parts)
     console.print(f"\n[bold green]ssr ▸[/bold green] {reply}\n")
+
+
+def _print_sessions(agent: SSRAgent, console: Console) -> None:
+    sessions = agent.sessions.list()
+    if not sessions:
+        console.print("[dim]No recorded sessions yet.[/dim]")
+        return
+    table = Table(title="Recorded sessions", header_style="bold cyan")
+    table.add_column("Updated")
+    table.add_column("Turns", justify="right")
+    table.add_column("Title")
+    for s in sessions[:30]:
+        marker = " [green]●[/green]" if s.get("id") == agent.session_id else ""
+        table.add_row(
+            (s.get("updated") or s.get("created") or "")[:19].replace("T", " "),
+            str(s.get("turns", 0)),
+            (s.get("title") or "(untitled)") + marker,
+        )
+    console.print(table)
 
 
 def _print_status(agent: SSRAgent, console: Console) -> None:
