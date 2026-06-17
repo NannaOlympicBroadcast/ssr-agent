@@ -42,6 +42,11 @@ ssr
    ak & sk.
 5. **ACP interface** — `ssr --experimental-acp` speaks the
    [Agent Client Protocol](https://agentclientprotocol.com).
+5b. **Remote control** — `ssr rc` connects this instance to an
+   [SSR Dispatch Server](https://github.com/NannaOlympicBroadcast/ssr-dispatch-server)
+   as a *node*. From the dispatch web UI you can browse this machine's files,
+   open a live terminal, and transfer files both ways; an MCP-over-SSE endpoint
+   lets any AI dispatch agents to your nodes by name or tag.
 6. **Built-in skills** installed to `~/.ssr/skills`:
    [larksuite](https://github.com/larksuite/cli) and
    [agent-browser](https://github.com/vercel-labs/agent-browser).
@@ -74,7 +79,26 @@ ssr task create nightly "summarise today's git log" --cron "0 22 * * *"
 # Feishu / Lark bot (WebSocket long connection — no webhook URL)
 ssr feishu configure     # set working dir, session id, app id (ak), app secret (sk)
 ssr feishu serve         # opens an outbound WS to Feishu and serves the agent
+
+# Remote control (connect to a dispatch server as a node)
+ssr rc                   # first run prompts for endpoint + token, then connects
+ssr rc status            # show the saved remote-control config
+ssr rc tags prod,gpu     # set this node's tags (applied on next connect)
 ```
+
+### Remote control (`ssr rc`)
+
+Run `ssr rc` to register this machine as a **node** on a dispatch server. The
+node dials out over a single WebSocket (no inbound port needed) and serves:
+
+- **Filesystem** browsing and **file/image transfer** both ways.
+- An interactive **terminal** (a real PTY) driven from the dispatch web UI.
+- One-shot shell commands and full **`agent.run`** tasks dispatched over MCP.
+
+First run is interactive (dispatch endpoint, API token, node name, tags); the
+config is saved to `~/.ssr/remote.json`. See the
+[ssr-dispatch-server](https://github.com/NannaOlympicBroadcast/ssr-dispatch-server)
+project for the server, web UI, and the `<baseurl>/mcp?key=<token>` endpoint.
 
 ### Slash commands (inside the TUI)
 `/help` `/index [category]` `/status` `/context <mode> <query>`
