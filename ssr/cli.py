@@ -142,6 +142,22 @@ def cmd_acp(settings: Settings) -> int:
     return 0
 
 
+def cmd_rc(args, settings: Settings, console: Console) -> int:
+    from .integrations import remote
+
+    action = getattr(args, "rc_action", None)
+    if action == "configure":
+        remote.configure_interactive(settings)
+        return 0
+    if action == "status":
+        return remote.show_status(settings)
+    if action == "tags":
+        tags = [t for chunk in args.tags for t in chunk.split(",")]
+        return remote.set_tags(settings, tags)
+    # default: connect (configuring on first run)
+    return remote.run_remote(settings, reconfigure=bool(getattr(args, "reconfigure", False)))
+
+
 def repl(settings: Settings, console: Console) -> int:
     from .agent.core import SSRAgent
     from .slash import handle as handle_slash
@@ -224,6 +240,14 @@ def build_parser() -> argparse.ArgumentParser:
     fsub.add_parser("configure")
     fsub.add_parser("serve", help="run the bot over a WebSocket long connection")
 
+    rc = sub.add_parser("rc", help="remote control: connect this instance to a dispatch server")
+    rc.add_argument("--reconfigure", action="store_true", help="re-run interactive setup")
+    rcsub = rc.add_subparsers(dest="rc_action")
+    rcsub.add_parser("configure", help="set dispatch endpoint, token, node name and tags")
+    rcsub.add_parser("status", help="show the saved remote-control configuration")
+    rctags = rcsub.add_parser("tags", help="set this node's tags (comma/space separated)")
+    rctags.add_argument("tags", nargs="+", help="tags, e.g. prod gpu  or  prod,gpu")
+
     return p
 
 
@@ -258,6 +282,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_task_run(args, settings, console)
     if args.command == "feishu":
         return cmd_feishu(args, settings, console)
+    if args.command == "rc":
+        return cmd_rc(args, settings, console)
 
     return repl(settings, console)
 

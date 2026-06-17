@@ -20,7 +20,10 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr/integrations/` — `pm2` background tasks, `feishu` (Lark) bot, `acp`
   (Agent Client Protocol) server, `mcp_client` (spawns the MCP servers in
   `~/.ssr/mcp.json` and speaks JSON-RPC over stdio; tools are exposed to the
-  model as `mcp__<server>__<tool>` and routed by `SSRAgent`).
+  model as `mcp__<server>__<tool>` and routed by `SSRAgent`), `remote`
+  (`ssr rc` — opens an outbound WebSocket to a dispatch server, registering this
+  instance as a *node* and serving filesystem / terminal (PTY) / command /
+  `agent.run` RPCs; config in `~/.ssr/remote.json`).
 
 ## Conventions
 - Keep tools as plain typed functions with docstrings (ADK auto-wraps them).
@@ -34,4 +37,6 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr --experimental-acp` — ACP server over stdio
 - `ssr task create <name> "<prompt>" --cron "*/30 * * * *"` — pm2 task
 - `ssr feishu configure` — set up the Lark bot
+- `ssr rc` — connect this instance to a dispatch server as a remote-control node
+  (`ssr rc status` / `ssr rc tags <a,b>` / `ssr rc configure` / `ssr rc --reconfigure`)
 - `python -m pytest` — run tests
