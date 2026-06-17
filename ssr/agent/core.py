@@ -261,6 +261,10 @@ class SSRAgent:
         Intermediate reasoning text and every tool call/result are streamed to
         the TUI via :meth:`_emit` so the user sees the agent think and act.
         """
+        import os
+        if os.environ.get("SSR_USE_OPENAI") == "1":
+            return self._complete_openai(contents, system_instruction, toolkit, max_iters, tag)
+
         from google.genai import types
 
         client = self._ensure_client()
@@ -319,6 +323,211 @@ class SSRAgent:
                     )
                 )
             contents.append(types.Content(role="tool", parts=fr_parts))
+        return "(reached tool-call limit without a final answer)"
+
+    def _complete_openai(
+        self, contents, system_instruction, toolkit: ToolKit, max_iters: int, tag: str = "ssr"
+    ) -> str:
+        import os
+        import json
+        import openai
+        from google.genai import types
+
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        api_key = os.environ.get("OPENAI_API_KEY", "fake-key")
+        model_name = self.settings.default_model
+
+        client = openai.OpenAI(base_url=base_url, api_key=api_key)
+        dispatch = {fn.__name__: fn for fn in toolkit.callables()}
+
+        # Helper to convert functions to OpenAI tool specs
+        def fn_to_tool(fn):
+            import inspect
+            name = fn.__name__
+            doc = fn.__doc__ or ""
+            description = doc.strip().split("\n")[0] if doc else f"Call {name}"
+            
+            sig = inspect.signature(fn)
+            properties = {}
+            required = []
+            param_docs = {}
+            
+            # Simple docstring parameter description parsing
+            lines = doc.strip().split("\n")
+            current_section = "desc"
+            for line in lines:
+                line_strip = line.strip()
+                if not line_strip:
+                    continue
+                if line_strip.lower().startswith("args:"):
+                    current_section = "args"
+                    continue
+                if current_section == "args":
+                    if ":" in line_strip:
+                        p_name, p_doc = line_strip.split(":", 1)
+                        param_docs[p_name.strip()] = p_doc.strip()
+            
+            for param_name, param in sig.parameters.items():
+                if param_name == "self":
+                    continue
+                param_type = "string"
+                if param.annotation == int:
+                    param_type = "integer"
+                elif param.annotation == bool:
+                    param_type = "boolean"
+                elif param.annotation == float:
+                    param_type = "number"
+                elif param.annotation == list or getattr(param.annotation, "__origin__", None) == list:
+                    param_type = "array"
+                
+                param_desc = param_docs.get(param_name, f"Parameter {param_name}")
+                p_schema = {"type": param_type, "description": param_desc}
+                if param_type == "array":
+                    p_schema["items"] = {"type": "string"}
+                
+                properties[param_name] = p_schema
+                if param.default == inspect.Parameter.empty:
+                    required.append(param_name)
+                    
+            return {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description[:1024],
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                    }
+                }
+            }
+
+        # Translate tools
+        tools = [fn_to_tool(fn) for fn in toolkit.callables()]
+        mcp_param = self._mcp_tools_parameter()
+        if mcp_param is not None:
+            for dec in mcp_param.function_declarations:
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": dec.name,
+                        "description": (dec.description or "")[:1024],
+                        "parameters": dec.parameters_json_schema or {"type": "object", "properties": {}}
+                    }
+                })
+
+        for _ in range(max_iters):
+            # Translate Gemini contents to OpenAI messages
+            messages = []
+            if system_instruction:
+                messages.append({"role": "system", "content": system_instruction})
+            
+            for content in contents:
+                role = content.role
+                if role == "model":
+                    role = "assistant"
+                
+                text_content = ""
+                tool_calls = []
+                
+                parts = content.parts or []
+                for part in parts:
+                    if getattr(part, "text", None):
+                        text_content += part.text
+                    elif getattr(part, "function_call", None):
+                        tool_calls.append({
+                            "id": getattr(part, "function_call").name,
+                            "type": "function",
+                            "function": {
+                                "name": getattr(part, "function_call").name,
+                                "arguments": json.dumps(getattr(part, "function_call").args or {}),
+                            }
+                        })
+                    elif getattr(part, "function_response", None):
+                        resp = getattr(part, "function_response")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": resp.name,
+                            "name": resp.name,
+                            "content": str(resp.response.get("result", "") if resp.response else ""),
+                        })
+                
+                if role != "tool":
+                    msg = {"role": role}
+                    if text_content:
+                        msg["content"] = text_content
+                    if tool_calls:
+                        msg["tool_calls"] = tool_calls
+                    messages.append(msg)
+
+            # Call OpenAI completion
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                tools=tools if tools else None,
+                tool_choice="auto" if tools else None,
+            )
+
+            message = resp.choices[0].message
+            text = message.content or ""
+            tool_calls = message.tool_calls or []
+
+            # Append the assistant's message to Gemini contents
+            gp_parts = []
+            if text:
+                gp_parts.append(types.Part(text=text))
+                self._emit("thinking", tag=tag, text=text)
+                
+            for tc in tool_calls:
+                call_args = json.loads(tc.function.arguments)
+                gp_parts.append(
+                    types.Part(
+                        function_call=types.FunctionCall(
+                            name=tc.function.name,
+                            args=call_args
+                        )
+                    )
+                )
+                self._emit("tool_call", tag=tag, name=tc.function.name, args=call_args)
+                
+            contents.append(types.Content(role="model", parts=gp_parts))
+
+            if not tool_calls:
+                if text:
+                    return text
+                return "(no response)"
+
+            # Execute tool calls and collect responses
+            fr_parts = []
+            for tc in tool_calls:
+                name = tc.function.name
+                args = json.loads(tc.function.arguments)
+                fn = dispatch.get(name)
+                
+                if is_mcp_tool_name(name):
+                    try:
+                        result = self.mcp_manager.call_tool(name, args)
+                    except Exception as e:
+                        result = f"ERROR: {type(e).__name__}: {e}"
+                elif fn is None:
+                    result = f"ERROR: unknown tool {name}"
+                else:
+                    try:
+                        result = fn(**args)
+                    except Exception as e:
+                        result = f"ERROR: {type(e).__name__}: {e}"
+                        
+                self._emit("tool_result", tag=tag, name=name, result=str(result))
+                fr_parts.append(
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            name=name,
+                            response={"result": str(result)}
+                        )
+                    )
+                )
+            contents.append(types.Content(role="tool", parts=fr_parts))
+
         return "(reached tool-call limit without a final answer)"
 
     # ------------------------------------------------------------- sub agents

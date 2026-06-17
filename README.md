@@ -84,6 +84,9 @@ ssr feishu serve         # opens an outbound WS to Feishu and serves the agent
 ssr rc                   # first run prompts for endpoint + token, then connects
 ssr rc status            # show the saved remote-control config
 ssr rc tags prod,gpu     # set this node's tags (applied on next connect)
+
+# Run EvalScope benchmark with custom runner
+python run_benchmark.py
 ```
 
 ### Remote control (`ssr rc`)
@@ -103,6 +106,20 @@ project for the server, web UI, and the `<baseurl>/mcp?key=<token>` endpoint.
 From the dispatch web UI you can **chat** with the agent on a node (with file &
 image attachments and a live preview of the agent's thinking and tool calls),
 and browse each node's **past sessions**.
+
+### EvalScope Benchmark (`run_benchmark.py`)
+
+SSR Agent integrates with the **EvalScope External Agent Bridge** framework. A custom runner (`SSRAgentRunner` inside [run_benchmark.py](file:///e:/ssr-agent/run_benchmark.py)) is registered using EvalScope's `@register_runner("ssr-agent")` decorator.
+
+When running under EvalScope:
+1. An OpenAI-compatible completion loop fallback (`_complete_openai` in `ssr/agent/core.py`) is triggered by the environment variable `SSR_USE_OPENAI=1`.
+2. The agent forwards its LLM completions, tool definitions, and tool execution results back to the EvalScope bridge endpoint.
+3. EvalScope intercepts and records the interaction trajectory as an `agent_trace`, which can be replayed and evaluated against benchmarks (such as GSM8K).
+
+To execute the benchmark:
+```bash
+python run_benchmark.py
+```
 
 ### Session recording
 
