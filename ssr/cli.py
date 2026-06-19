@@ -65,6 +65,8 @@ def _first_run_setup(settings: Settings, console: Console) -> None:
         settings.env_file.write_text(ENV_TEMPLATE, "utf-8")
     if not settings.mcp_config.exists():
         settings.mcp_config.write_text(MCP_TEMPLATE, "utf-8")
+    from .models import ensure_models_file
+    ensure_models_file(settings.models_file, settings.default_model)
     installed = install_builtin_skills(settings.skills_dir)
     if installed:
         console.print(f"[green]Installed built-in skills:[/green] {', '.join(installed)}")
@@ -135,6 +137,31 @@ def cmd_feishu(args, settings: Settings, console: Console) -> int:
     return 0
 
 
+
+def cmd_channel(args, settings: Settings, console: Console) -> int:
+    if args.channel_action == "config":
+        if args.kind == "feishu":
+            from .integrations import feishu
+            feishu.configure_interactive(settings)
+        elif args.kind == "wechat":
+            from .integrations import wechat
+            wechat.configure_interactive(settings)
+        else:
+            console.print(f"[red]Unknown channel:[/red] {args.kind}")
+            return 1
+    elif args.channel_action == "on":
+        kind = args.kind or "feishu"
+        if kind == "feishu":
+            from .integrations import feishu
+            feishu.serve_long_connection(settings)
+        elif kind == "wechat":
+            from .integrations import wechat
+            wechat.serve(settings)
+        else:
+            console.print(f"[red]Unknown channel:[/red] {kind}")
+            return 1
+    return 0
+
 def cmd_acp(settings: Settings) -> int:
     from .integrations.acp import run_acp
 
@@ -187,13 +214,13 @@ def repl(settings: Settings, console: Console) -> int:
         try:
             line = prompt_fn().strip()
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]bye 谢谢喵[/dim]")
+            console.print("\n[dim]bye[/dim]")
             return 0
         if not line:
             continue
         if line.startswith("/"):
             if not handle_slash(line, agent, settings, console):
-                console.print("[dim]bye 谢谢喵[/dim]")
+                console.print("[dim]bye[/dim]")
                 return 0
             continue
         if "GEMINI_API_KEY" in missing_required(settings):
@@ -240,6 +267,13 @@ def build_parser() -> argparse.ArgumentParser:
     fsub.add_parser("configure")
     fsub.add_parser("serve", help="run the bot over a WebSocket long connection")
 
+    ch = sub.add_parser("channel", help="configure/listen IM channels")
+    chsub = ch.add_subparsers(dest="channel_action", required=True)
+    chc = chsub.add_parser("config", help="configure a channel")
+    chc.add_argument("kind", choices=["feishu", "wechat"])
+    cho = chsub.add_parser("on", help="listen on a channel")
+    cho.add_argument("kind", nargs="?", choices=["feishu", "wechat"], default="feishu")
+
     rc = sub.add_parser("rc", help="remote control: connect this instance to a dispatch server")
     rc.add_argument("--reconfigure", action="store_true", help="re-run interactive setup")
     rcsub = rc.add_subparsers(dest="rc_action")
@@ -282,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_task_run(args, settings, console)
     if args.command == "feishu":
         return cmd_feishu(args, settings, console)
+    if args.command == "channel":
+        return cmd_channel(args, settings, console)
     if args.command == "rc":
         return cmd_rc(args, settings, console)
 

@@ -11,10 +11,11 @@ Each piece of context is a :class:`ContextItem`. Retrieval can be performed with
 classic ``grep`` string match or with a model2vec embedding search.
 """
 
-from .pool import ContextCategory, ContextItem, ContextPool
+from .pool import AbstractContextPool, ContextCategory, ContextItem, ContextPool
 from .retrieval import RetrievalMode, Retriever
 
 __all__ = [
+    "AbstractContextPool",
     "ContextCategory",
     "ContextItem",
     "ContextPool",

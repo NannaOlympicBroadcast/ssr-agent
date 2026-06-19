@@ -14,7 +14,7 @@ try:
 except Exception:  # pragma: no cover - pyfiglet always present in deps
     _HAS_FIGLET = False
 
-SUBTITLE = "支持 snh48 宋昕冉 谢谢喵"
+SUBTITLE = "SSR Agent"
 
 # Hand-tuned fallback so the banner still renders without pyfiglet installed.
 _FALLBACK = r"""

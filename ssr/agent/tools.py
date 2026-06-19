@@ -11,6 +11,7 @@ from __future__ import annotations
 import locale
 import subprocess
 from pathlib import Path
+from .terminal import TERMINALS
 
 from ..config import Settings
 from ..context_pool.retrieval import Retriever
@@ -137,6 +138,43 @@ class ToolKit:
         out = out[:_MAX_OUTPUT]
         return f"exit={proc.returncode}\n{out}".strip()
 
+
+    def start_terminal_task(self, command: str) -> str:
+        """Start an asynchronous shell command and return a task id.
+
+        Args:
+            command: The shell command line to execute asynchronously.
+        """
+        task_id = TERMINALS.start(command, self.settings.project_dir)
+        return f"terminal_task={task_id}"
+
+    def read_terminal_task(self, task_id: str) -> str:
+        """Read available output and status from an asynchronous terminal task.
+
+        Args:
+            task_id: Task id returned by start_terminal_task.
+        """
+        return TERMINALS.read(task_id)
+
+    def send_terminal_input(self, task_id: str, text: str) -> str:
+        """Send keys or text to a running asynchronous terminal task.
+
+        Args:
+            task_id: Task id returned by start_terminal_task.
+            text: Text/keys to write to stdin.
+        """
+        return TERMINALS.send(task_id, text)
+
+    def push_notification(self, message: str, channel: str = "default") -> str:
+        """Push a notification message to the configured channel.
+
+        Args:
+            message: Notification text to send.
+            channel: Channel/user identifier or 'default'.
+        """
+        from ..integrations.channels import push_notification
+        return push_notification(self.settings, message, channel)
+
     def update_plan(self, steps: list[str]) -> str:
         """Record the current step-by-step plan for the task.
 
@@ -246,6 +284,10 @@ class ToolKit:
             self.write_file,
             self.list_dir,
             self.run_command,
+            self.start_terminal_task,
+            self.read_terminal_task,
+            self.send_terminal_input,
+            self.push_notification,
             self.update_plan,
             self.get_plan,
             self.remember,
