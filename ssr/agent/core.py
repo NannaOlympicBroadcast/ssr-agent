@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..config import Settings
 from ..context_pool.retrieval import Retriever
-from ..integrations.mcp_client import MCPManager, MCPTool, is_mcp_tool_name
+from ..integrations.mcp_client import MCPManager, MCPTool
 from ..rules import load_rules
 from .memory import MemoryStore
 from .sessions import SessionStore
@@ -164,6 +164,35 @@ class SSRAgent:
     def run(self, user_message: str) -> str:
         """Run a single text turn (convenience wrapper over :meth:`run_parts`)."""
         return self.run_parts([{"type": "text", "text": user_message}])
+
+    def run_goal(self, goal: str, max_rounds: int = 5) -> str:
+        """Iterate on a user goal until the model reports it is satisfied.
+
+        The loop deliberately uses the normal agent/tool path rather than a
+        mock verifier: each round asks the model to either continue concrete
+        work or finish with a `GOAL_COMPLETE:` summary when the desired effect
+        has been reached.
+        """
+        prompt = (
+            "Goal mode is active. Work toward the following goal and keep using "
+            "available tools until it is satisfied. When it is satisfied, start "
+            "your final answer with `GOAL_COMPLETE:`.\n\n"
+            f"Goal: {goal}"
+        )
+        last_reply = ""
+        for round_no in range(1, max_rounds + 1):
+            round_prompt = prompt if round_no == 1 else (
+                "Continue goal mode. If the goal is now satisfied, start with "
+                "`GOAL_COMPLETE:`; otherwise perform the next concrete step and "
+                "explain what remains."
+            )
+            last_reply = self.run(round_prompt)
+            if last_reply.lstrip().startswith("GOAL_COMPLETE:"):
+                return last_reply
+        return (
+            "Goal loop reached its iteration limit before explicit completion. "
+            f"Last response:\n{last_reply}"
+        )
 
     def run_parts(self, content_parts: list[dict]) -> str:
         """Run one turn from mixed input parts (text / image / audio).
