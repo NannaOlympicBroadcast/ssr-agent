@@ -54,6 +54,18 @@ class Settings:
     default_model: str = DEFAULT_MODEL_FALLBACK
     extra: dict[str, str] = field(default_factory=dict)
 
+    @property
+    def fallback_models(self) -> list[str]:
+        models_file = self.home / "models.json"
+        if not models_file.exists():
+            return []
+        try:
+            import json
+            data = json.loads(models_file.read_text())
+            return data.get("fallback_models", [])
+        except Exception:
+            return []
+
     # --- derived paths -----------------------------------------------------
     @property
     def env_file(self) -> Path:

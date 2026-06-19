@@ -4,14 +4,14 @@ A beautiful command-line **coding agent**, built on [Google ADK](https://adk.dev
 and Gemini. `claude.md`-compatible, with a four-category context pool and
 model2vec vector retrieval at its core.
 
-> 支持 snh48 宋昕冉 谢谢喵
+>
 
 ```
 ssr
 ┌────────────────────────── ✨ SSR Agent ✨ ──────────────────────────┐
 │  ██╗    ██╗███████╗██╗      ██████╗ ██████╗ ███╗   ███╗███████╗     │
 │  ...   Welcome To SSR   ...                                        │
-│                  支持 snh48 宋昕冉 谢谢喵                             │
+│                                               │
 └────────────────────── powered by Google ADK · gemini ───────────────┘
 ```
 

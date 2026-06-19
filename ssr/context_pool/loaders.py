@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..config import CONFIG_DOC_NAMES, Settings
 from ..skills.manager import discover_skills
-from .pool import ContextCategory, ContextItem, ContextPool
+from .pool import ContextItem, ContextPool
 
 _MAX_BYTES = 200_000
 
@@ -35,7 +35,7 @@ def load_configurations(settings: Settings) -> list[ContextItem]:
             scope = "global" if base == settings.home else "project"
             items.append(
                 ContextItem(
-                    category=ContextCategory.CONFIGURATIONS,
+                    category="configurations",
                     title=f"{name} ({scope})",
                     text=text,
                     source=str(path),
@@ -51,7 +51,7 @@ def load_skills(settings: Settings) -> list[ContextItem]:
     for skill in discover_skills(settings.skill_dirs()):
         items.append(
             ContextItem(
-                category=ContextCategory.SKILLS,
+                category="skills",
                 title=skill.name,
                 text=skill.content,
                 source=str(skill.path),
@@ -70,7 +70,7 @@ def load_memory(settings: Settings) -> list[ContextItem]:
             if text.strip():
                 items.append(
                     ContextItem(
-                        category=ContextCategory.MEMORY,
+                        category="memory",
                         title=f"memory.md ({scope})",
                         text=text,
                         source=str(path),
@@ -94,7 +94,7 @@ def load_memory(settings: Settings) -> list[ContextItem]:
             ts = rec.get("ts", "")
             items.append(
                 ContextItem(
-                    category=ContextCategory.MEMORY,
+                    category="memory",
                     title=f"chat#{n} {role} {ts}".strip(),
                     text=f"[{role}] {content}",
                     source=str(chats),
@@ -113,7 +113,7 @@ def load_tools_context(tool_specs: list[dict]) -> list[ContextItem]:
         origin = spec.get("origin", "builtin")
         items.append(
             ContextItem(
-                category=ContextCategory.TOOLS,
+                category="tools",
                 title=name,
                 text=f"{name}: {desc}",
                 source=origin,

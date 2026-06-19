@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from ..config import Settings
 from .index import Embedder, VectorIndex
 from .loaders import build_pool
-from .pool import ContextCategory, ContextItem, ContextPool
+from .pool import ContextCategory, ContextPool
 
 
 class RetrievalMode(str, enum.Enum):
@@ -113,7 +113,7 @@ class Retriever:
             pattern = re.compile(re.escape(query), re.IGNORECASE)
         results: list[RetrievalResult] = []
         for item in self.pool().items:
-            if item.category.value not in cats:
+            if getattr(item.category, 'value', item.category) not in cats:
                 continue
             haystack = f"{item.title}\n{item.text}"
             matches = list(pattern.finditer(haystack))
@@ -121,7 +121,7 @@ class Retriever:
                 results.append(
                     RetrievalResult(
                         score=float(len(matches)),
-                        category=item.category.value,
+                        category=getattr(item.category, 'value', item.category),
                         title=item.title,
                         source=item.source,
                         snippet=_around(haystack, matches[0].start()),

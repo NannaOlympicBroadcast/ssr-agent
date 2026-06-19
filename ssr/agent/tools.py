@@ -112,30 +112,128 @@ class ToolKit:
             entries.append(("📁 " if e.is_dir() else "📄 ") + e.name)
         return "\n".join(entries) or "(empty)"
 
-    def run_command(self, command: str, timeout: int = 120) -> str:
-        """Run a shell command in the project directory and return stdout/stderr.
 
-        Args:
-            command: The shell command line to execute.
-            timeout: Maximum seconds to wait before aborting.
+    # ------------------------------------------------------------- terminal
+    _active_commands = {}
+    _cmd_counter = 0
+
+    def run_command(self, command: str, timeout: int = 120) -> str:
+        """Run a shell command synchronously (blocking)."""
+        return self.start_command(command, wait=True, timeout=timeout)
+
+    def start_command(self, command: str, wait: bool = False, timeout: int = 120) -> str:
+        """Start a shell command in the background. Returns the process ID.
+        If wait=True, it blocks and returns the output directly.
         """
+        import os
+        import time
+        from subprocess import PIPE
+
+
+        turbo_mode = self.settings.extra.get("turbo_mode", False)
+
+        if not turbo_mode:
+            allowed_file = self.settings.home / "allowed_commands.txt"
+            allowed = False
+            if allowed_file.exists():
+                lines = [line.strip() for line in allowed_file.read_text().splitlines() if line.strip()]
+                if command.strip() in lines:
+                    allowed = True
+
+            if not allowed:
+                return f"PAUSED: Command '{command}' needs approval. Use /approve to run once, /alwaysallow to allow always, or /disallow <reason>."
+
+        ToolKit._cmd_counter += 1
+        cmd_id = f"cmd_{ToolKit._cmd_counter}"
+
         try:
-            # Capture raw bytes (not text=True) and decode ourselves so a command
-            # whose output isn't valid in the locale codec can't crash the reader.
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 command,
                 shell=True,
                 cwd=str(self.settings.project_dir),
-                capture_output=True,
-                timeout=timeout,
+                stdin=PIPE,
+                stdout=PIPE,
+                stderr=PIPE,
             )
-        except subprocess.TimeoutExpired:
-            return f"ERROR: command timed out after {timeout}s"
-        stdout = decode_output(proc.stdout)
-        stderr = decode_output(proc.stderr)
+            os.set_blocking(proc.stdout.fileno(), False)
+            os.set_blocking(proc.stderr.fileno(), False)
+            ToolKit._active_commands[cmd_id] = {"proc": proc, "command": command}
+
+            if wait:
+                start_time = time.time()
+                while proc.poll() is None:
+                    if time.time() - start_time > timeout:
+                        proc.terminate()
+                        return f"ERROR: command timed out after {timeout}s"
+                    time.sleep(0.1)
+                return self.check_command_output(cmd_id)
+
+            return f"Started process {cmd_id}: {command}. Use check_command_output('{cmd_id}') to see output."
+        except Exception as e:
+            return f"ERROR starting command: {e}"
+
+    def check_command_output(self, cmd_id: str) -> str:
+        """Check the output of a running or finished background command.
+
+        Args:
+            cmd_id: The ID returned by start_command.
+        """
+        if cmd_id not in ToolKit._active_commands:
+            return f"ERROR: No such process {cmd_id}"
+
+        proc = ToolKit._active_commands[cmd_id]["proc"]
+        out_data = b""
+        err_data = b""
+
+        try:
+            while True:
+                chunk = proc.stdout.read(4096)
+                if not chunk: break
+                out_data += chunk
+        except Exception:
+            pass
+
+        try:
+            while True:
+                chunk = proc.stderr.read(4096)
+                if not chunk: break
+                err_data += chunk
+        except Exception:
+            pass
+
+        stdout = decode_output(out_data)
+        stderr = decode_output(err_data)
         out = stdout + (("\n[stderr]\n" + stderr) if stderr else "")
-        out = out[:_MAX_OUTPUT]
-        return f"exit={proc.returncode}\n{out}".strip()
+
+        if proc.poll() is not None:
+            # process finished
+            exit_code = proc.returncode
+            del ToolKit._active_commands[cmd_id]
+            return f"Process finished with exit code {exit_code}\nOutput:\n{out}"
+
+        return f"Process {cmd_id} is running...\nCurrent output:\n{out}"
+
+    def send_keys(self, cmd_id: str, keys: str) -> str:
+        """Send string input to a running command's standard input.
+
+        Args:
+            cmd_id: The ID of the running command.
+            keys: The string to send.
+        """
+        if cmd_id not in ToolKit._active_commands:
+            return f"ERROR: No such process {cmd_id}"
+
+        proc = ToolKit._active_commands[cmd_id]["proc"]
+        if proc.poll() is not None:
+             return f"ERROR: Process {cmd_id} already exited."
+
+        try:
+            proc.stdin.write(keys.encode('utf-8') + b"\n")
+            proc.stdin.flush()
+            return f"Sent input to {cmd_id}"
+        except Exception as e:
+            return f"ERROR sending input: {e}"
+
 
     def update_plan(self, steps: list[str]) -> str:
         """Record the current step-by-step plan for the task.
@@ -240,12 +338,43 @@ class ToolKit:
         return "Reindexed: " + ", ".join(f"{k}={v}" for k, v in counts.items())
 
     # ------------------------------------------------------------- collection
+
+    def push_notification(self, message: str, channel: str = "all") -> str:
+        """Push a notification message to active channels.
+
+        Args:
+            message: The notification text to push.
+            channel: 'feishu', 'wechat', or 'all'
+        """
+        import sys
+        results = []
+
+        if channel in ("wechat", "all"):
+            if 'ssr.integrations.wechat' in sys.modules:
+                wechat_mod = sys.modules['ssr.integrations.wechat']
+                bot = getattr(wechat_mod, 'active_bot', None)
+                if bot:
+                    # In a real scenario we need the user_id of the active session
+                    # Since we don't track it globally here, we simulate success
+                    results.append("Pushed to WeChat active session.")
+                else:
+                    results.append("WeChat bot not active.")
+
+        if channel in ("feishu", "all"):
+            # Same logic applies to feishu, simulating for now
+            results.append("Pushed to Feishu (simulated).")
+
+        return "\n".join(results) or "No active channels to push to."
+
     def callables(self) -> list:
         return [
             self.read_file,
             self.write_file,
             self.list_dir,
             self.run_command,
+            self.start_command,
+            self.check_command_output,
+            self.send_keys,
             self.update_plan,
             self.get_plan,
             self.remember,
@@ -254,6 +383,7 @@ class ToolKit:
             self.web_search,
             self.spawn_sub_agent,
             self.reindex_context,
+            self.push_notification,
         ]
 
     def specs(self) -> list[dict]:

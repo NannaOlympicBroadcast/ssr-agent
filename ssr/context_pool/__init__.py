@@ -15,7 +15,7 @@ from .pool import ContextCategory, ContextItem, ContextPool
 from .retrieval import RetrievalMode, Retriever
 
 __all__ = [
-    "ContextCategory",
+    "",
     "ContextItem",
     "ContextPool",
     "RetrievalMode",

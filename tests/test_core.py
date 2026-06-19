@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -36,7 +35,7 @@ def test_pool_categories():
 
 
 def test_category_coerce():
-    assert ContextCategory.coerce("TOOLS") is ContextCategory.TOOLS
+    assert ContextCategory.coerce("TOOLS") == 'tools'
     assert RetrievalMode.coerce("grep") is RetrievalMode.CLASSIC
     assert RetrievalMode.coerce("embedding") is RetrievalMode.EMBEDDING
 

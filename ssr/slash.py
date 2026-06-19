@@ -16,10 +16,17 @@ HELP = {
     "/attach": "Send an image/audio file: /attach <path> [prompt]  (aliases /image /audio)",
     "/skills": "List discovered skills",
     "/memory": "Show MEMORY (project + global)",
+    "/goal": "Loop task execution until success",
     "/plan": "Show the agent's current plan",
     "/sessions": "List recorded conversation sessions",
+    "/approve": "Approve a paused command for execution",
+    "/alwaysallow": "Permanently allow a command",
+    "/disallow": "Deny a paused command",
     "/clear": "Reset the conversation session",
     "/quit": "Exit SSR (aliases: /exit, /q)",
+    "/project": "Switch to project directory",
+    "/session": "Manage sessions: /session <list|resume <id>|new>",
+    "/model": "Switch the active model",
 }
 
 
@@ -76,13 +83,108 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
         console.print("[bold cyan]Global memory[/bold cyan]")
         console.print(agent.memory.recall("global") or "[dim](empty)[/dim]")
 
+    elif cmd == "/goal":
+        if not args:
+            console.print("[yellow]Usage: /goal <task>[/yellow]")
+            return True
+        task = " ".join(args)
+        console.print(f"[cyan]Goal started: {task}[/cyan]")
+
+        for _ in range(10): # max 10 loops to prevent infinite
+             reply = agent.run(f"Goal: {task}. Have you completed it? If yes, start your response with 'SUCCESS:'. If not, continue working.")
+             console.print(f"[dim]... progress: {reply[:100]}[/dim]")
+             if reply.strip().startswith("SUCCESS:"):
+                 console.print(f"[bold green]Goal Achieved:[/bold green] {reply}")
+                 break
+        else:
+             console.print("[red]Goal failed to reach SUCCESS within limit.[/red]")
+        return True
+
     elif cmd == "/plan":
         console.print(agent.toolkit.get_plan())
+
+    elif cmd == "/approve":
+        settings.extra["turbo_mode"] = True
+        console.print("[green]Command approved for this run.[/green]")
+        # Tell the agent to proceed
+        reply = agent.run("Command approved. Please execute the tool call again.")
+        settings.extra["turbo_mode"] = False
+        console.print(f"\n[bold green]ssr ▸[/bold green] {reply}\n")
+        return True
+
+    elif cmd == "/alwaysallow":
+        allowed_file = settings.home / "allowed_commands.txt"
+
+        # We need the last command the agent tried to run. We can extract it from the agent's history or just enable turbo mode and tell it to run again.
+        # A more robust way is tracking the pending command, but for now we'll simulate the user adding it or passing the command string as arg
+        if args:
+            cmd_to_allow = " ".join(args)
+            with open(allowed_file, "a") as af:
+                af.write(cmd_to_allow + "\n")
+            console.print(f"[green]Command '{cmd_to_allow}' permanently allowed.[/green]")
+        else:
+             console.print("[yellow]Usage: /alwaysallow <command_string>[/yellow]")
+        return True
+
+    elif cmd == "/disallow":
+        reason = " ".join(args) if args else "User denied."
+        console.print(f"[red]Command disallowed: {reason}[/red]")
+        reply = agent.run(f"User disallowed the command execution. Reason: {reason}. Tell user to do something else.")
+        console.print(f"\n[bold green]ssr ▸[/bold green] {reply}\n")
+        return True
 
     elif cmd == "/clear":
         agent._history.clear()
         agent.session_id = None  # next turn starts a fresh recorded session
         console.print("[green]Session cleared.[/green]")
+
+    elif cmd == "/project":
+        from pathlib import Path
+        if not args:
+            console.print(f"Current project: {settings.project_dir}")
+        else:
+            new_dir = Path(args[0]).expanduser().resolve()
+            if new_dir.exists() and new_dir.is_dir():
+                settings.project_dir = new_dir
+                console.print(f"[green]Switched project to {new_dir}[/green]")
+            else:
+                console.print(f"[red]Directory not found: {new_dir}[/red]")
+        return True
+
+    elif cmd == "/session":
+        if not args:
+            console.print("[yellow]Usage: /session <list|resume <id>|new>[/yellow]")
+            return True
+
+        action = args[0].lower()
+        if action == "list":
+            _print_sessions(agent, console)
+        elif action == "new":
+            sid = agent.new_session()
+            console.print(f"[green]New session created: {sid}[/green]")
+        elif action == "resume":
+            if len(args) < 2:
+                console.print("[yellow]Usage: /session resume <id>[/yellow]")
+            else:
+                sid = args[1]
+                if agent.load_session(sid):
+                    console.print(f"[green]Resumed session {sid}[/green]")
+                else:
+                    console.print(f"[red]Failed to load session {sid}[/red]")
+        else:
+             console.print("[yellow]Usage: /session <list|resume <id>|new>[/yellow]")
+        return True
+
+    elif cmd == "/model":
+        if not args:
+            console.print(f"Current model: {settings.default_model}")
+            fallback = settings.fallback_models
+            if fallback:
+                console.print(f"Fallback models: {', '.join(fallback)}")
+        else:
+            new_model = args[0]
+            settings.default_model = new_model
+            console.print(f"[green]Switched model to {new_model}[/green]")
 
     elif cmd == "/sessions":
         _print_sessions(agent, console)

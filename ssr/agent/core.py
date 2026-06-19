@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 
 from ..config import Settings
 from ..context_pool.retrieval import Retriever
@@ -17,9 +18,10 @@ from ..integrations.mcp_client import MCPManager, MCPTool, is_mcp_tool_name
 from .memory import MemoryStore
 from .sessions import SessionStore
 from .tools import ToolKit
+from .hooks import run_hooks
 
 SYSTEM_PROMPT = """You are SSR Agent, a meticulous command-line coding agent.
-支持 snh48 宋昕冉 谢谢喵.
+
 
 Operating principles:
 1. PLAN before acting on non-trivial tasks: call `update_plan` with concrete steps.
@@ -30,6 +32,8 @@ Operating principles:
 4. Persist durable facts/preferences with `remember`.
 5. Use `web_search` (Tavily) for up-to-date external information.
 6. Delegate self-contained subtasks to `spawn_sub_agent`.
+7. 坚持使用websearch、项目文件、工具调用及结果grounding，一定不要凭空编造
+8. 如果出现故障不要使用mock或者fake的方式回退，直接告知用户去修复故障
 Be concise. Show your reasoning through the plan and tool calls, not verbosity.
 """
 
@@ -63,6 +67,20 @@ class SSRAgent:
         self._client = None  # retained so its HTTP transport isn't GC-closed
         self._history = []  # running conversation Contents (multi-turn memory)
         self._mcp_tools_param = None  # cached genai Tool for the MCP declarations
+
+    def invoke(self, data: dict) -> str:
+        """Standard programmatic interface accepting a dict with 'messages' list."""
+        parts = []
+        for msg in data.get("messages", []):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                parts.append({"type": "text", "text": f"[{role}] {content}"})
+            elif isinstance(content, list):
+                 for c in content:
+                     if isinstance(c, dict) and c.get("type") == "text":
+                         parts.append({"type": "text", "text": f"[{role}] {c.get('text')}"})
+        return self.run_parts(parts)
 
     def close(self) -> None:
         """Tear down all managed MCP server subprocesses."""
@@ -120,6 +138,15 @@ class SSRAgent:
     def system_instruction(self) -> str:
         parts = [SYSTEM_PROMPT]
         configs = self.retriever.pool().by_category("configurations")
+
+        # Load rules
+        global_rules = self.settings.home / "rules.md"
+        if global_rules.exists():
+            parts.append("\n# Global Rules\n" + global_rules.read_text(errors='replace'))
+        proj_rules = self.settings.project_state_dir / "rules.md"
+        if proj_rules.exists():
+            parts.append("\n# Project Rules\n" + proj_rules.read_text(errors='replace'))
+
         if configs:
             parts.append("\n# Loaded configurations (claude.md / soul.md / profile.md)")
             for item in configs:
@@ -281,9 +308,28 @@ class SSRAgent:
         )
 
         for _ in range(max_iters):
-            resp = client.models.generate_content(
-                model=self.settings.default_model, contents=contents, config=config
-            )
+            max_retries = 3
+            models_to_try = [self.settings.default_model] + self.settings.fallback_models
+
+            for model_name in models_to_try:
+                for attempt in range(max_retries):
+                    try:
+                        resp = client.models.generate_content(
+                            model=model_name, contents=contents, config=config
+                        )
+                        break # Success
+                    except Exception:
+                        if attempt < max_retries - 1:
+                            time.sleep(2 ** attempt) # Exponential backoff
+                        else:
+                            resp = None
+
+                if resp is not None:
+                    break # Success with this model
+
+            if resp is None:
+                return f"ERROR: API request failed for all models after {max_retries} retries."
+
             candidate = (resp.candidates or [None])[0]
             if candidate is None or candidate.content is None:
                 return (getattr(resp, "text", None) or "(no response)").strip()
@@ -313,7 +359,9 @@ class SSRAgent:
                     result = f"ERROR: unknown tool {call.name}"
                 else:
                     try:
+                        run_hooks(self.settings, "PreToolUse", {"tool_name": call.name})
                         result = fn(**args)
+                        run_hooks(self.settings, "PostToolUse", {"tool_name": call.name, "result": str(result)})
                     except Exception as e:  # surface tool errors back to the model
                         result = f"ERROR: {type(e).__name__}: {e}"
                 self._emit("tool_result", tag=tag, name=call.name, result=str(result))
@@ -461,12 +509,31 @@ class SSRAgent:
                     messages.append(msg)
 
             # Call OpenAI completion
-            resp = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                tools=tools if tools else None,
-                tool_choice="auto" if tools else None,
-            )
+            max_retries = 3
+            models_to_try = [model_name] + self.settings.fallback_models
+
+            for m_name in models_to_try:
+                for attempt in range(max_retries):
+                    try:
+                        resp = client.chat.completions.create(
+                            model=m_name,
+                            messages=messages,
+                            tools=tools if tools else None,
+                            tool_choice="auto" if tools else None,
+                        )
+                        break
+                    except Exception:
+                        if attempt < max_retries - 1:
+                            time.sleep(2 ** attempt)
+                        else:
+                            resp = None
+
+                if resp is not None:
+                    break
+
+            if resp is None:
+                return f"ERROR: OpenAI API request failed for all models after {max_retries} retries."
+
 
             message = resp.choices[0].message
             text = message.content or ""
@@ -513,7 +580,9 @@ class SSRAgent:
                     result = f"ERROR: unknown tool {name}"
                 else:
                     try:
+                        run_hooks(self.settings, "PreToolUse", {"tool_name": name})
                         result = fn(**args)
+                        run_hooks(self.settings, "PostToolUse", {"tool_name": name, "result": str(result)})
                     except Exception as e:
                         result = f"ERROR: {type(e).__name__}: {e}"
                         

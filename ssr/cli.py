@@ -73,6 +73,13 @@ def _first_run_setup(settings: Settings, console: Console) -> None:
 def cmd_init(args, settings: Settings, console: Console) -> int:
     _first_run_setup(settings, console)
     install_builtin_skills(settings.skills_dir, force=True)
+
+    import subprocess
+    anthropic_dir = settings.skills_dir / "anthropic"
+    if not anthropic_dir.exists():
+        console.print("[cyan]Installing anthropic official skills...[/cyan]")
+        subprocess.run(["git", "clone", "https://github.com/anthropics/skills", str(anthropic_dir)], capture_output=True)
+
     console.print(f"[green]✓[/green] SSR home ready at [bold]{settings.home}[/bold]")
     console.print(f"  Edit [bold]{settings.env_file}[/bold] to add GEMINI_API_KEY / TAVILY_API_KEY")
     return 0
@@ -83,6 +90,7 @@ def cmd_ask(args, settings: Settings, console: Console) -> int:
 
     if args.cwd:
         settings = load_settings(args.cwd)
+    settings.extra["turbo_mode"] = getattr(args, "turbo_mode", False) or getattr(args, "bypass_permissions", False)
     missing = missing_required(settings)
     if "GEMINI_API_KEY" in missing:
         console.print("[red]GEMINI_API_KEY not set — configure ~/.ssr/.env[/red]")
@@ -125,14 +133,6 @@ def cmd_task_run(args, settings: Settings, console: Console) -> int:
     return 0
 
 
-def cmd_feishu(args, settings: Settings, console: Console) -> int:
-    from .integrations import feishu
-
-    if args.feishu_action == "configure":
-        feishu.configure_interactive(settings)
-    elif args.feishu_action == "serve":
-        feishu.serve_long_connection(settings)
-    return 0
 
 
 def cmd_acp(settings: Settings) -> int:
@@ -208,6 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ssr", description="SSR Agent — CLI coding agent (Google ADK)")
     p.add_argument("--version", action="store_true", help="print version and exit")
     p.add_argument("--experimental-acp", action="store_true", help="run as an ACP server over stdio")
+    p.add_argument("--turbo-mode", action="store_true", help="bypass execution permissions")
+    p.add_argument("--bypass-permissions", action="store_true", help="bypass execution permissions")
     p.add_argument("-C", "--cwd", help="project working directory")
 
     sub = p.add_subparsers(dest="command")
@@ -235,10 +237,15 @@ def build_parser() -> argparse.ArgumentParser:
     tr = sub.add_parser("task-run", help="run a stored task once (used by pm2)")
     tr.add_argument("--task", required=True)
 
-    fei = sub.add_parser("feishu", help="configure / serve the Feishu (Lark) bot")
-    fsub = fei.add_subparsers(dest="feishu_action", required=True)
-    fsub.add_parser("configure")
-    fsub.add_parser("serve", help="run the bot over a WebSocket long connection")
+    serve_p = sub.add_parser("serve", help="run a standard OpenAI compatible REST API server")
+    serve_p.add_argument("--port", type=int, default=8000)
+
+    chan = sub.add_parser("channel", help="configure / serve a channel bot (feishu/wechat)")
+    csub = chan.add_subparsers(dest="channel_action", required=True)
+    c_conf = csub.add_parser("config")
+    c_conf.add_argument("name", choices=["feishu", "wechat"])
+    c_on = csub.add_parser("on")
+    c_on.add_argument("name", choices=["feishu", "wechat"])
 
     rc = sub.add_parser("rc", help="remote control: connect this instance to a dispatch server")
     rc.add_argument("--reconfigure", action="store_true", help="re-run interactive setup")
@@ -262,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     settings = load_settings(args.cwd)
+    settings.extra["turbo_mode"] = getattr(args, "turbo_mode", False) or getattr(args, "bypass_permissions", False)
 
     if args.experimental_acp:
         # ACP speaks pure JSON-RPC 2.0 on stdout — keep stdout clean and route
@@ -280,8 +288,24 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_task(args, settings, console)
     if args.command == "task-run":
         return cmd_task_run(args, settings, console)
-    if args.command == "feishu":
-        return cmd_feishu(args, settings, console)
+    if args.command == "serve":
+        from .server import serve
+        return serve(args.port)
+    if args.command == "channel":
+        if args.channel_action == "config":
+            if args.name == "feishu":
+                from .integrations import feishu
+                return feishu.configure_interactive(settings)
+            elif args.name == "wechat":
+                console.print("[cyan]WeChat integration does not require explicit config. It authenticates via QR code at runtime.[/cyan]")
+                return 0
+        elif args.channel_action == "on":
+            if args.name == "feishu":
+                from .integrations import feishu
+                return feishu.serve_long_connection(settings)
+            elif args.name == "wechat":
+                from .integrations import wechat
+                return wechat.serve_long_connection(settings)
     if args.command == "rc":
         return cmd_rc(args, settings, console)
 
