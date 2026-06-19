@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from rich.console import Console
 from rich.table import Table
 
@@ -17,12 +19,15 @@ HELP = {
     "/skills": "List discovered skills",
     "/memory": "Show MEMORY (project + global)",
     "/plan": "Show the agent's current plan",
+    "/project": "Show or switch project directory: /project [path]",
     "/model": "Manage models: /model [list|switch <id>]",
+    "/session": "Manage sessions: /session <list|resume <id>|new>",
+    "/goal": "Run until a goal is satisfied: /goal <goal description>",
     "/bypass-permissions": "Bypass command approval (toggle turbo mode)",
     "/approve": "Approve the pending command",
     "/alwaysallow": "Always allow the pending command pattern",
     "/disallow": "Deny the pending command: /disallow [reason]",
-    "/sessions": "List recorded conversation sessions",
+    "/sessions": "List recorded conversation sessions (alias for /session list)",
     "/clear": "Reset the conversation session",
     "/quit": "Exit SSR (aliases: /exit, /q)",
 }
@@ -84,13 +89,45 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
     elif cmd == "/plan":
         console.print(agent.toolkit.get_plan())
 
+    elif cmd == "/project":
+        if not args:
+            console.print(f"Current project directory: [bold cyan]{agent.settings.project_dir}[/bold cyan]")
+        else:
+            p = Path(" ".join(args)).expanduser().resolve()
+            agent.settings.project_dir = p
+            agent.toolkit.settings.project_dir = p
+            settings.project_dir = p
+            console.print(f"[green]Switched project directory to:[/green] [bold cyan]{p}[/bold cyan]")
+
     elif cmd == "/clear":
         agent._history.clear()
         agent.session_id = None  # next turn starts a fresh recorded session
         console.print("[green]Session cleared.[/green]")
 
-    elif cmd == "/sessions":
-        _print_sessions(agent, console)
+    elif cmd in ("/session", "/sessions"):
+        if cmd == "/sessions" or (args and args[0] == "list"):
+            _print_sessions(agent, console)
+        elif not args:
+            console.print("[yellow]Usage: /session <list|resume <id>|new>[/yellow]")
+        elif args[0] == "resume" and len(args) > 1:
+            sid = args[1]
+            if agent.load_session(sid):
+                console.print(f"[green]Resumed session[/green] [bold cyan]{sid}[/bold cyan].")
+            else:
+                console.print(f"[red]Session '{sid}' not found.[/red]")
+        elif args[0] == "new":
+            sid = agent.new_session()
+            console.print(f"[green]Started new session[/green] [bold cyan]{sid}[/bold cyan].")
+        else:
+            console.print("[yellow]Usage: /session <list|resume <id>|new>[/yellow]")
+
+    elif cmd == "/goal":
+        if not args:
+            console.print("[yellow]Usage: /goal <goal description>[/yellow]")
+        else:
+            goal = " ".join(args)
+            console.print(f"[dim magenta]working toward goal…[/dim magenta] {goal}")
+            console.print(agent.run_goal(goal))
 
     elif cmd == "/model":
         if not args:
