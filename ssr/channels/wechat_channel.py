@@ -316,6 +316,16 @@ class WeChatChannel(AbstractChannel):
                             except Exception as e:
                                 image_error = e
                                 break
+                        elif itype == 3: # VOICE
+                            voice_item = item.get("voice_item", {})
+                            text = voice_item.get("text", "")
+                            if text:
+                                downloaded_parts.append({"type": "text", "text": f"[语音转文字: {text}]"})
+                        elif itype == 4: # FILE
+                            file_item = item.get("file_item", {})
+                            file_name = file_item.get("file_name", "unknown_file")
+                            downloaded_parts.append({"type": "text", "text": f"[文件接收: {file_name}]"})
+    
                                 
                     if image_error:
                         send_reply(target_repr, f"无法接收图片消息: 图片下载或解密失败: {image_error}，请重试。")
