@@ -18,6 +18,10 @@ HELP = {
     "/memory": "Show MEMORY (project + global)",
     "/plan": "Show the agent's current plan",
     "/sessions": "List recorded conversation sessions",
+    "/session": "Manage sessions: /session <list|resume <id>|new>",
+    "/project": "Switch project directory: /project <path>",
+    "/model": "List or switch model: /model [model_name]",
+    "/goal": "Run toward a goal: /goal <desired outcome>",
     "/clear": "Reset the conversation session",
     "/quit": "Exit SSR (aliases: /exit, /q)",
 }
@@ -86,6 +90,22 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
 
     elif cmd == "/sessions":
         _print_sessions(agent, console)
+
+    elif cmd == "/session":
+        _handle_session(args, agent, console)
+
+    elif cmd == "/project":
+        _handle_project(args, agent, settings, console)
+
+    elif cmd == "/model":
+        _handle_model(args, agent, settings, console)
+
+    elif cmd == "/goal":
+        if not args:
+            console.print("[yellow]Usage: /goal <desired outcome>[/yellow]")
+        else:
+            reply = agent.run("Work until this goal is satisfied, then deliver: " + " ".join(args))
+            console.print(f"\n[bold green]ssr ▸[/bold green] {reply}\n")
 
     else:
         console.print(f"[red]Unknown command:[/red] {cmd}. Try /help")
@@ -158,3 +178,54 @@ def _print_status(agent: SSRAgent, console: Console) -> None:
         indexed = idx.get("items", 0)
         table.add_row(cat, str(n), f"{indexed} ({backend})")
     console.print(table)
+
+
+def _handle_session(args: list[str], agent: SSRAgent, console: Console) -> None:
+    action = args[0] if args else "list"
+    if action == "list":
+        _print_sessions(agent, console)
+    elif action == "new":
+        sid = agent.new_session("manual")
+        agent._history.clear()
+        console.print(f"[green]New session:[/green] {sid}")
+    elif action == "resume" and len(args) > 1:
+        console.print("[green]Resumed.[/green]" if agent.load_session(args[1]) else "[red]No such session.[/red]")
+    else:
+        console.print("[yellow]Usage: /session <list|resume <session_id>|new>[/yellow]")
+
+
+def _handle_project(args: list[str], agent: SSRAgent, settings: Settings, console: Console) -> None:
+    from pathlib import Path
+    if not args:
+        console.print(f"[cyan]Current project:[/cyan] {settings.project_dir}")
+        return
+    path = Path(" ".join(args)).expanduser().resolve()
+    if not path.is_dir():
+        console.print(f"[red]Not a directory:[/red] {path}")
+        return
+    settings.project_dir = path
+    agent.settings.project_dir = path
+    agent.retriever._pool = None
+    console.print(f"[green]Project switched to[/green] {path}")
+
+
+def _handle_model(args: list[str], agent: SSRAgent, settings: Settings, console: Console) -> None:
+    from .models import list_models, set_primary
+    if not args:
+        for m in list_models(settings.models_file, settings.default_model):
+            marker = "*" if m.name == settings.default_model else " "
+            console.print(f"{marker} {m.name} ({m.provider})")
+        return
+    data = set_primary(settings.models_file, settings.default_model, args[0])
+    settings.default_model = data["primary"]
+    agent.settings.default_model = data["primary"]
+    agent._client = None
+    console.print(f"[green]Model switched to[/green] {settings.default_model}")
+
+
+def handle_text_command(command: str, agent: SSRAgent, settings: Settings) -> str:
+    from io import StringIO
+    buf = StringIO()
+    console = Console(file=buf, force_terminal=False, width=100)
+    handle(command, agent, settings, console)
+    return buf.getvalue().strip()

@@ -13,14 +13,13 @@ from pathlib import Path
 
 from ..config import Settings
 from ..context_pool.retrieval import Retriever
+from ..hooks import run_hooks
 from ..integrations.mcp_client import MCPManager, MCPTool, is_mcp_tool_name
 from .memory import MemoryStore
 from .sessions import SessionStore
 from .tools import ToolKit
 
 SYSTEM_PROMPT = """You are SSR Agent, a meticulous command-line coding agent.
-支持 snh48 宋昕冉 谢谢喵.
-
 Operating principles:
 1. PLAN before acting on non-trivial tasks: call `update_plan` with concrete steps.
 2. Use the filesystem and `run_command` tools to inspect and change the project.
@@ -28,8 +27,9 @@ Operating principles:
    from the context pool before asking the user or guessing. Prefer embedding mode
    for fuzzy questions, classic (grep) mode for exact strings.
 4. Persist durable facts/preferences with `remember`.
-5. Use `web_search` (Tavily) for up-to-date external information.
-6. Delegate self-contained subtasks to `spawn_sub_agent`.
+5. Use `web_search` (Tavily), project files, tool calls, and tool results for grounding; do not fabricate facts.
+6. If a dependency, API, command, or tool fails, report the real failure and ask the user to fix it; do not fall back to mock or fake behavior.
+7. Delegate self-contained subtasks to `spawn_sub_agent`.
 Be concise. Show your reasoning through the plan and tool calls, not verbosity.
 """
 
@@ -185,6 +185,7 @@ class SSRAgent:
             gp.append(types.Part(text=text_blob))
 
         self._history.append(types.Content(role="user", parts=gp))
+        run_hooks(self.settings, "UserPromptSubmit", {"prompt": summary, "session_id": self.session_id})
         try:
             reply = self._complete(
                 self._history, self.system_instruction(), self.toolkit, max_iters=24, tag="ssr"
@@ -192,6 +193,7 @@ class SSRAgent:
         except Exception as e:
             reply = f"[agent error] {e}"
         self._history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
+        run_hooks(self.settings, "Stop", {"reply": reply, "session_id": self.session_id})
         self.memory.log_turn("assistant", reply)
         self._record_turn("assistant", reply)
         return reply
@@ -281,9 +283,18 @@ class SSRAgent:
         )
 
         for _ in range(max_iters):
-            resp = client.models.generate_content(
-                model=self.settings.default_model, contents=contents, config=config
-            )
+            last_error = None
+            for attempt in range(3):
+                try:
+                    resp = client.models.generate_content(
+                        model=self.settings.default_model, contents=contents, config=config
+                    )
+                    break
+                except Exception as e:
+                    last_error = e
+                    if attempt == 2:
+                        raise
+            
             candidate = (resp.candidates or [None])[0]
             if candidate is None or candidate.content is None:
                 return (getattr(resp, "text", None) or "(no response)").strip()

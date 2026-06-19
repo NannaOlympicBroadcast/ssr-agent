@@ -34,7 +34,7 @@ SKILL_DIRS = (
 )
 
 # Configuration documents loaded into the "configurations" context pool.
-CONFIG_DOC_NAMES = ("claude.md", "CLAUDE.md", "soul.md", "profile.md")
+CONFIG_DOC_NAMES = ("claude.md", "CLAUDE.md", "soul.md", "profile.md", "rules.md", "RULES.md")
 
 
 def ssr_home() -> Path:
@@ -68,8 +68,20 @@ class Settings:
         return self.home / "mcp.json"
 
     @property
+    def models_file(self) -> Path:
+        return self.home / "models.json"
+
+    @property
+    def allowed_commands_file(self) -> Path:
+        return self.home / "allowed_commands.txt"
+
+    @property
     def skills_dir(self) -> Path:
         return self.home / "skills"
+
+    @property
+    def plugins_dir(self) -> Path:
+        return self.home / "plugins"
 
     @property
     def memory_file(self) -> Path:
@@ -99,7 +111,7 @@ class Settings:
         return dirs
 
     def ensure_dirs(self) -> None:
-        for d in (self.home, self.indexes_dir, self.skills_dir, self.project_state_dir):
+        for d in (self.home, self.indexes_dir, self.skills_dir, self.plugins_dir, self.project_state_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 
@@ -121,6 +133,11 @@ def load_settings(project_dir: str | os.PathLike | None = None) -> Settings:
         tavily_api_key=os.environ.get("TAVILY_API_KEY"),
         default_model=os.environ.get("DEFAULT_MODEL", DEFAULT_MODEL_FALLBACK),
     )
+    try:
+        from .models import load_registry
+        settings.default_model = load_registry(settings.models_file, settings.default_model).get("primary") or settings.default_model
+    except Exception:
+        pass
     # Make the key visible to google-genai / google-adk which look up GOOGLE_API_KEY.
     if settings.gemini_api_key:
         os.environ.setdefault("GOOGLE_API_KEY", settings.gemini_api_key)

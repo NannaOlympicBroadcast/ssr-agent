@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import hashlib
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 
@@ -50,8 +51,24 @@ class ContextItem:
         }
 
 
+class AbstractContextPool(ABC):
+    """Abstract base for future context pool implementations."""
+
+    @abstractmethod
+    def add(self, item: ContextItem) -> None: ...
+
+    @abstractmethod
+    def extend(self, items: list[ContextItem]) -> None: ...
+
+    @abstractmethod
+    def by_category(self, category: "str | ContextCategory") -> list[ContextItem]: ...
+
+    @abstractmethod
+    def categories_summary(self) -> dict[str, int]: ...
+
+
 @dataclass
-class ContextPool:
+class ContextPool(AbstractContextPool):
     """In-memory collection of context items, grouped by category."""
 
     items: list[ContextItem] = field(default_factory=list)
