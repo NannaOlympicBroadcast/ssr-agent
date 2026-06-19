@@ -14,7 +14,6 @@ try:
 except Exception:  # pragma: no cover - pyfiglet always present in deps
     _HAS_FIGLET = False
 
-SUBTITLE = "支持 snh48 宋昕冉 谢谢喵"
 
 # Hand-tuned fallback so the banner still renders without pyfiglet installed.
 _FALLBACK = r"""
@@ -40,12 +39,9 @@ def render_banner(console: Console | None = None, font: str = "ansi_shadow") -> 
         art = _FALLBACK
 
     title = Text(art.rstrip("\n"), style="bold magenta")
-    subtitle = Text(SUBTITLE, style="bold cyan")
 
     body = Text(justify="center")
     body.append_text(title)
-    body.append("\n\n")
-    body.append_text(subtitle)
 
     panel = Panel(
         Align.center(body),

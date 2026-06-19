@@ -91,6 +91,34 @@ class Settings:
     def feishu_config(self) -> Path:
         return self.home / "feishu.json"
 
+    @property
+    def rules_file(self) -> Path:
+        return self.home / "rules.md"
+
+    @property
+    def project_rules_file(self) -> Path:
+        return self.project_state_dir / "rules.md"
+
+    @property
+    def models_config(self) -> Path:
+        return self.home / "models.json"
+
+    @property
+    def hooks_config(self) -> Path:
+        return self.home / "hooks.json"
+
+    @property
+    def project_hooks_config(self) -> Path:
+        return self.project_state_dir / "hooks.json"
+
+    @property
+    def plugins_dir(self) -> Path:
+        return self.home / "plugins"
+
+    @property
+    def project_plugins_dir(self) -> Path:
+        return self.project_state_dir / "plugins"
+
     def skill_dirs(self) -> list[Path]:
         # External ecosystems use fixed ~ paths; the SSR entry follows this
         # instance's home (so SSR_HOME / tests resolve correctly).

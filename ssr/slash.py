@@ -17,6 +17,11 @@ HELP = {
     "/skills": "List discovered skills",
     "/memory": "Show MEMORY (project + global)",
     "/plan": "Show the agent's current plan",
+    "/model": "Manage models: /model [list|switch <id>]",
+    "/bypass-permissions": "Bypass command approval (toggle turbo mode)",
+    "/approve": "Approve the pending command",
+    "/alwaysallow": "Always allow the pending command pattern",
+    "/disallow": "Deny the pending command: /disallow [reason]",
     "/sessions": "List recorded conversation sessions",
     "/clear": "Reset the conversation session",
     "/quit": "Exit SSR (aliases: /exit, /q)",
@@ -86,6 +91,66 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
 
     elif cmd == "/sessions":
         _print_sessions(agent, console)
+
+    elif cmd == "/model":
+        if not args:
+            primary = agent.models_config.get_primary()
+            console.print(f"Current model: [bold cyan]{primary.id}[/bold cyan] ({primary.provider}/{primary.model})")
+        elif args[0] == "list":
+            table = Table(title="Configured models", header_style="bold cyan")
+            table.add_column("ID")
+            table.add_column("Provider")
+            table.add_column("Model")
+            table.add_column("API Key Env")
+            table.add_column("Base URL")
+            table.add_column("Status")
+            
+            primary = agent.models_config.get_primary()
+            for m in agent.models_config.list_models():
+                status = "[green]primary[/green]" if m.id == primary.id else "fallback"
+                table.add_row(
+                    m.id,
+                    m.provider,
+                    m.model,
+                    m.api_key_env,
+                    m.base_url or "—",
+                    status
+                )
+            console.print(table)
+        elif args[0] == "switch" and len(args) > 1:
+            target_id = args[1]
+            if agent.models_config.switch_primary(target_id):
+                console.print(f"[green]Switched primary model to {target_id}[/green]")
+            else:
+                console.print(f"[red]Model '{target_id}' not found in configuration.[/red]")
+        else:
+            console.print("[yellow]Usage: /model [list|switch <id>][/yellow]")
+
+    elif cmd == "/bypass-permissions":
+        pm = agent.toolkit.permission_manager
+        pm.turbo_mode = not pm.turbo_mode
+        console.print(f"Turbo mode (bypass permissions): [bold cyan]{pm.turbo_mode}[/bold cyan]")
+
+    elif cmd in ("/approve", "/alwaysallow", "/disallow"):
+        from ssr.approval import get_active_approval, ApprovalDecision
+        approval = get_active_approval()
+        if not approval:
+            console.print("[yellow]No pending command requires approval.[/yellow]")
+        else:
+            if cmd == "/approve":
+                approval.decision = ApprovalDecision.ALLOW_ONCE
+                approval.event.set()
+                console.print("[green]Command approved (once).[/green]")
+            elif cmd == "/alwaysallow":
+                approval.decision = ApprovalDecision.ALWAYS_ALLOW
+                approval.event.set()
+                console.print("[green]Command pattern always allowed.[/green]")
+            elif cmd == "/disallow":
+                reason = " ".join(args) if args else "Denied by user"
+                approval.decision = ApprovalDecision.DENY
+                approval.reason = reason
+                approval.event.set()
+                console.print(f"[red]Command disallowed: {reason}[/red]")
 
     else:
         console.print(f"[red]Unknown command:[/red] {cmd}. Try /help")

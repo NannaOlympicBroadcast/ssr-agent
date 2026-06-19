@@ -14,12 +14,12 @@ from pathlib import Path
 from ..config import Settings
 from ..context_pool.retrieval import Retriever
 from ..integrations.mcp_client import MCPManager, MCPTool, is_mcp_tool_name
+from ..rules import load_rules
 from .memory import MemoryStore
 from .sessions import SessionStore
 from .tools import ToolKit
 
 SYSTEM_PROMPT = """You are SSR Agent, a meticulous command-line coding agent.
-支持 snh48 宋昕冉 谢谢喵.
 
 Operating principles:
 1. PLAN before acting on non-trivial tasks: call `update_plan` with concrete steps.
@@ -38,6 +38,8 @@ class SSRAgent:
     def __init__(self, settings: Settings, on_event=None):
         self.settings = settings
         self.on_event = on_event  # optional callback(event: dict) for TUI streaming
+        from ..models import ModelsConfig
+        self.models_config = ModelsConfig(settings)
         # Spawn the MCP servers declared in ~/.ssr/mcp.json and enumerate their
         # tools. Failures are isolated per-server (the agent still runs).
         self.mcp_manager = _start_mcp_manager(settings.mcp_config)
@@ -58,11 +60,14 @@ class SSRAgent:
             self.memory,
             sub_agent_runner=self._run_sub_agent,
         )
+        self.toolkit.agent_instance = self
         # Seed the 'tools' context category with builtin + MCP tool specs.
         self.retriever.tool_specs = self.toolkit.specs() + self.mcp_tool_specs
         self._client = None  # retained so its HTTP transport isn't GC-closed
         self._history = []  # running conversation Contents (multi-turn memory)
         self._mcp_tools_param = None  # cached genai Tool for the MCP declarations
+        self.terminal_contexts = {}
+        self.active_im_context = None
 
     def close(self) -> None:
         """Tear down all managed MCP server subprocesses."""
@@ -119,6 +124,19 @@ class SSRAgent:
     # ----------------------------------------------------------- instructions
     def system_instruction(self) -> str:
         parts = [SYSTEM_PROMPT]
+        
+        # New mandatory system rules
+        parts.append(
+            "\nRULES:\n"
+            "1. Always ground responses using web search, project files, tool calls and their results. NEVER fabricate information.\n"
+            "2. If a failure occurs, do NOT fall back to mock or fake implementations. Report the failure to the user and ask them to fix it."
+        )
+        
+        # User defined rules from load_rules
+        user_rules = load_rules(self.settings)
+        if user_rules:
+            parts.append(f"\n## User Rules\n{user_rules}")
+            
         configs = self.retriever.pool().by_category("configurations")
         if configs:
             parts.append("\n# Loaded configurations (claude.md / soul.md / profile.md)")
@@ -251,284 +269,91 @@ class SSRAgent:
     def _complete(
         self, contents, system_instruction, toolkit: ToolKit, max_iters: int, tag: str = "ssr"
     ) -> str:
-        """Manual function-calling loop.
-
-        google-genai's *automatic* function calling does not invoke bound
-        methods, so we drive the tool loop ourselves: the SDK still auto-builds
-        the function schemas from the typed callables, and we dispatch each
-        ``function_call`` to the matching :class:`ToolKit` method.
-
-        Intermediate reasoning text and every tool call/result are streamed to
-        the TUI via :meth:`_emit` so the user sees the agent think and act.
-        """
-        import os
-        if os.environ.get("SSR_USE_OPENAI") == "1":
-            return self._complete_openai(contents, system_instruction, toolkit, max_iters, tag)
-
-        from google.genai import types
-
-        client = self._ensure_client()
-        dispatch = {fn.__name__: fn for fn in toolkit.callables()}
-        # Builtin Python callables + a Tool carrying the MCP function declarations.
-        tools = list(toolkit.callables())
-        mcp_param = self._mcp_tools_parameter()
-        if mcp_param is not None:
-            tools.append(mcp_param)
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            tools=tools,
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        )
-
-        for _ in range(max_iters):
-            resp = client.models.generate_content(
-                model=self.settings.default_model, contents=contents, config=config
-            )
-            candidate = (resp.candidates or [None])[0]
-            if candidate is None or candidate.content is None:
-                return (getattr(resp, "text", None) or "(no response)").strip()
-            parts = candidate.content.parts or []
-            calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
-            text = " ".join(p.text for p in parts if getattr(p, "text", None)).strip()
-            contents.append(candidate.content)
-            if not calls:
-                if text:
-                    return text
-                return "(no response)"
-            # Reasoning the model emitted alongside its tool calls.
-            if text:
-                self._emit("thinking", tag=tag, text=text)
-            fr_parts = []
-            for call in calls:
-                fn = dispatch.get(call.name)
-                args = dict(call.args or {})
-                self._emit("tool_call", tag=tag, name=call.name, args=args)
-                if is_mcp_tool_name(call.name):
-                    # Route MCP tool calls to the managed server subprocess.
-                    try:
-                        result = self.mcp_manager.call_tool(call.name, args)
-                    except Exception as e:
-                        result = f"ERROR: {type(e).__name__}: {e}"
-                elif fn is None:
-                    result = f"ERROR: unknown tool {call.name}"
-                else:
-                    try:
-                        result = fn(**args)
-                    except Exception as e:  # surface tool errors back to the model
-                        result = f"ERROR: {type(e).__name__}: {e}"
-                self._emit("tool_result", tag=tag, name=call.name, result=str(result))
-                fr_parts.append(
-                    types.Part.from_function_response(
-                        name=call.name, response={"result": str(result)}
-                    )
+        """Driver loop that delegates to the active provider with auto-fallback and retry."""
+        import time
+        from ssr.providers import get_provider
+        
+        primary_entry = self.models_config.get_primary()
+        fallback_entries = self.models_config.get_fallbacks()
+        candidate_entries = [primary_entry] + fallback_entries
+        
+        last_error = None
+        for entry in candidate_entries:
+            try:
+                provider = get_provider(self.settings, entry, agent_instance=self)
+            except Exception as e:
+                last_error = e
+                self._emit(
+                    "warning",
+                    tag=tag,
+                    text=f"Failed to instantiate provider '{entry.id}' ({entry.provider}): {e}. Trying next model.",
                 )
-            contents.append(types.Content(role="tool", parts=fr_parts))
-        return "(reached tool-call limit without a final answer)"
-
-    def _complete_openai(
-        self, contents, system_instruction, toolkit: ToolKit, max_iters: int, tag: str = "ssr"
-    ) -> str:
-        import os
-        import json
-        import openai
-        from google.genai import types
-
-        base_url = os.environ.get("OPENAI_BASE_URL")
-        api_key = os.environ.get("OPENAI_API_KEY", "fake-key")
-        model_name = self.settings.default_model
-
-        client = openai.OpenAI(base_url=base_url, api_key=api_key)
-        dispatch = {fn.__name__: fn for fn in toolkit.callables()}
-
-        # Helper to convert functions to OpenAI tool specs
-        def fn_to_tool(fn):
-            import inspect
-            name = fn.__name__
-            doc = fn.__doc__ or ""
-            description = doc.strip().split("\n")[0] if doc else f"Call {name}"
-            
-            sig = inspect.signature(fn)
-            properties = {}
-            required = []
-            param_docs = {}
-            
-            # Simple docstring parameter description parsing
-            lines = doc.strip().split("\n")
-            current_section = "desc"
-            for line in lines:
-                line_strip = line.strip()
-                if not line_strip:
-                    continue
-                if line_strip.lower().startswith("args:"):
-                    current_section = "args"
-                    continue
-                if current_section == "args":
-                    if ":" in line_strip:
-                        p_name, p_doc = line_strip.split(":", 1)
-                        param_docs[p_name.strip()] = p_doc.strip()
-            
-            for param_name, param in sig.parameters.items():
-                if param_name == "self":
-                    continue
-                param_type = "string"
-                if param.annotation == int:
-                    param_type = "integer"
-                elif param.annotation == bool:
-                    param_type = "boolean"
-                elif param.annotation == float:
-                    param_type = "number"
-                elif param.annotation == list or getattr(param.annotation, "__origin__", None) == list:
-                    param_type = "array"
+                continue
                 
-                param_desc = param_docs.get(param_name, f"Parameter {param_name}")
-                p_schema = {"type": param_type, "description": param_desc}
-                if param_type == "array":
-                    p_schema["items"] = {"type": "string"}
-                
-                properties[param_name] = p_schema
-                if param.default == inspect.Parameter.empty:
-                    required.append(param_name)
+            max_retries = 3
+            backoff_base = 2.0
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    return provider.complete(
+                        contents=contents,
+                        system_instruction=system_instruction,
+                        toolkit=toolkit,
+                        max_iters=max_iters,
+                        tag=tag,
+                    )
+                except Exception as e:
+                    last_error = e
+                    if attempt == max_retries:
+                        self._emit(
+                            "warning",
+                            tag=tag,
+                            text=f"Model '{entry.id}' ({entry.provider}) failed after {max_retries} retries: {e}. Falling back to next model.",
+                        )
+                        break
                     
-            return {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": description[:1024],
-                    "parameters": {
-                        "type": "object",
-                        "properties": properties,
-                        "required": required,
-                    }
-                }
-            }
-
-        # Translate tools
-        tools = [fn_to_tool(fn) for fn in toolkit.callables()]
-        mcp_param = self._mcp_tools_parameter()
-        if mcp_param is not None:
-            for dec in mcp_param.function_declarations:
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": dec.name,
-                        "description": (dec.description or "")[:1024],
-                        "parameters": dec.parameters_json_schema or {"type": "object", "properties": {}}
-                    }
-                })
-
-        for _ in range(max_iters):
-            # Translate Gemini contents to OpenAI messages
-            messages = []
-            if system_instruction:
-                messages.append({"role": "system", "content": system_instruction})
-            
-            for content in contents:
-                role = content.role
-                if role == "model":
-                    role = "assistant"
-                
-                text_content = ""
-                tool_calls = []
-                
-                parts = content.parts or []
-                for part in parts:
-                    if getattr(part, "text", None):
-                        text_content += part.text
-                    elif getattr(part, "function_call", None):
-                        tool_calls.append({
-                            "id": getattr(part, "function_call").name,
-                            "type": "function",
-                            "function": {
-                                "name": getattr(part, "function_call").name,
-                                "arguments": json.dumps(getattr(part, "function_call").args or {}),
-                            }
-                        })
-                    elif getattr(part, "function_response", None):
-                        resp = getattr(part, "function_response")
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": resp.name,
-                            "name": resp.name,
-                            "content": str(resp.response.get("result", "") if resp.response else ""),
-                        })
-                
-                if role != "tool":
-                    msg = {"role": role}
-                    if text_content:
-                        msg["content"] = text_content
-                    if tool_calls:
-                        msg["tool_calls"] = tool_calls
-                    messages.append(msg)
-
-            # Call OpenAI completion
-            resp = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                tools=tools if tools else None,
-                tool_choice="auto" if tools else None,
-            )
-
-            message = resp.choices[0].message
-            text = message.content or ""
-            tool_calls = message.tool_calls or []
-
-            # Append the assistant's message to Gemini contents
-            gp_parts = []
-            if text:
-                gp_parts.append(types.Part(text=text))
-                self._emit("thinking", tag=tag, text=text)
-                
-            for tc in tool_calls:
-                call_args = json.loads(tc.function.arguments)
-                gp_parts.append(
-                    types.Part(
-                        function_call=types.FunctionCall(
-                            name=tc.function.name,
-                            args=call_args
-                        )
+                    sleep_time = (backoff_base ** attempt) * 1.0
+                    self._emit(
+                        "warning",
+                        tag=tag,
+                        text=f"API error with '{entry.id}': {e}. Retrying in {sleep_time}s... (attempt {attempt + 1}/{max_retries})",
                     )
-                )
-                self._emit("tool_call", tag=tag, name=tc.function.name, args=call_args)
-                
-            contents.append(types.Content(role="model", parts=gp_parts))
+                    time.sleep(sleep_time)
+                    
+        raise last_error or RuntimeError("All configured model providers failed.")
 
-            if not tool_calls:
-                if text:
-                    return text
-                return "(no response)"
-
-            # Execute tool calls and collect responses
-            fr_parts = []
-            for tc in tool_calls:
-                name = tc.function.name
-                args = json.loads(tc.function.arguments)
-                fn = dispatch.get(name)
-                
-                if is_mcp_tool_name(name):
-                    try:
-                        result = self.mcp_manager.call_tool(name, args)
-                    except Exception as e:
-                        result = f"ERROR: {type(e).__name__}: {e}"
-                elif fn is None:
-                    result = f"ERROR: unknown tool {name}"
-                else:
-                    try:
-                        result = fn(**args)
-                    except Exception as e:
-                        result = f"ERROR: {type(e).__name__}: {e}"
-                        
-                self._emit("tool_result", tag=tag, name=name, result=str(result))
-                fr_parts.append(
-                    types.Part(
-                        function_response=types.FunctionResponse(
-                            name=name,
-                            response={"result": str(result)}
-                        )
-                    )
-                )
-            contents.append(types.Content(role="tool", parts=fr_parts))
-
-        return "(reached tool-call limit without a final answer)"
+    def on_terminal_finished(self, terminal_id: str, exit_code: int) -> None:
+        """Called when a background terminal process completes."""
+        self._emit(
+            "terminal_completed",
+            tag="ssr",
+            terminal_id=terminal_id,
+            exit_code=exit_code,
+        )
+        if self.session_id is not None:
+            import threading
+            import time
+            terminal_context = self.terminal_contexts.get(terminal_id)
+            def run_wakeup():
+                time.sleep(0.5)
+                prompt = f"[System] Background terminal {terminal_id} completed with exit code {exit_code}."
+                try:
+                    # Run turn and print/render output
+                    reply = self.run(prompt)
+                    # We can also print the final reply to the TUI if needed, but the TUI will see the events stream.
+                    # Let's print the final reply as well via _emit
+                    self._emit("thinking", tag="ssr", text=f"\n[ssr ▸] {reply}\n")
+                    
+                    if terminal_context:
+                        channel_name, target = terminal_context
+                        if channel_name == "rc":
+                            self._emit("wakeup", text=reply)
+                        else:
+                            from ssr.agent.tools_push import push_notification_impl
+                            push_notification_impl(self.settings, channel_name, target, reply)
+                except Exception:
+                    pass
+            threading.Thread(target=run_wakeup, daemon=True).start()
 
     # ------------------------------------------------------------- sub agents
     def _run_sub_agent(self, task: str, context: str = "") -> str:

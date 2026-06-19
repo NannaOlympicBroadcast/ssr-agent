@@ -117,3 +117,123 @@ def test_build_pool_smoke(settings: Settings):
     assert summary["tools"] == 1
     assert summary["skills"] >= 2
     assert summary["configurations"] >= 1
+
+
+def test_feishu_deprecation_warning():
+    from unittest.mock import MagicMock, patch
+    from rich.console import Console
+    from ssr.cli import cmd_feishu
+    from ssr.config import Settings
+    
+    args = MagicMock()
+    args.feishu_action = "configure"
+    settings = MagicMock(spec=Settings)
+    console = MagicMock(spec=Console)
+    
+    with patch("ssr.cli.cmd_channel") as mock_channel:
+        mock_channel.return_value = 0
+        res = cmd_feishu(args, settings, console)
+        assert res == 0
+        console.print.assert_called_with("[yellow]WARNING: ssr feishu is deprecated, use ssr channel instead[/yellow]")
+        mock_channel.assert_called_once()
+
+
+def test_channel_command_dispatch():
+    from unittest.mock import MagicMock, patch
+    from ssr.cli import main
+    from ssr.config import Settings
+    
+    with patch("ssr.cli.load_settings") as mock_load, \
+         patch("ssr.cli._first_run_setup") as mock_setup, \
+         patch("ssr.cli.cmd_channel") as mock_channel, \
+         patch("ssr.cli.repl") as mock_repl:
+         
+        mock_load.return_value = MagicMock(spec=Settings)
+        mock_channel.return_value = 0
+        
+        # Test 1: "channel config wechat"
+        res = main(["channel", "config", "wechat"])
+        assert res == 0
+        mock_channel.assert_called_once()
+        args = mock_channel.call_args[0][0]
+        assert args.command == "channel"
+        assert args.channel_action == "config"
+        assert args.channel_name == "wechat"
+        mock_repl.assert_not_called()
+        
+        # Test 2: "channel configure wechat" (alias)
+        mock_channel.reset_mock()
+        res = main(["channel", "configure", "wechat"])
+        assert res == 0
+        mock_channel.assert_called_once()
+        args = mock_channel.call_args[0][0]
+        assert args.command == "channel"
+        assert args.channel_action == "configure"
+        assert args.channel_name == "wechat"
+        mock_repl.assert_not_called()
+        
+        # Test 3: "channel serve wechat" (alias)
+        mock_channel.reset_mock()
+        res = main(["channel", "serve", "wechat"])
+        assert res == 0
+        mock_channel.assert_called_once()
+        args = mock_channel.call_args[0][0]
+        assert args.command == "channel"
+        assert args.channel_action == "serve"
+        assert args.channel_name == "wechat"
+        mock_repl.assert_not_called()
+
+
+def test_wechat_login_keyboard_interrupt():
+    from unittest.mock import MagicMock, patch
+    from ssr.channels.wechat_channel import WeChatChannel
+    from ssr.config import Settings
+    from pathlib import Path
+    
+    channel = WeChatChannel()
+    settings = MagicMock(spec=Settings)
+    settings.project_dir = "E:/mock"
+    settings.home = Path("C:/mock_home")
+    
+    with patch("builtins.input", side_effect=["y", ""]), \
+         patch("httpx.get", side_effect=KeyboardInterrupt()), \
+         patch("builtins.print") as mock_print:
+        
+        channel.run_login_flow(settings)
+        mock_print.assert_any_call("\n登录已取消。")
+
+
+def test_wechat_login_polling_timeout():
+    from unittest.mock import MagicMock, patch
+    from ssr.channels.wechat_channel import WeChatChannel
+    from ssr.config import Settings
+    from pathlib import Path
+    import httpx
+    
+    channel = WeChatChannel()
+    settings = MagicMock(spec=Settings)
+    settings.project_dir = "E:/mock"
+    settings.home = Path("C:/mock_home")
+    
+    mock_qrcode_resp = MagicMock()
+    mock_qrcode_resp.json.return_value = {"errcode": 0, "qrcode": "test_qrc", "qrcode_img_content": "test_img_url"}
+    
+    mock_status_success = MagicMock()
+    mock_status_success.json.return_value = {"status": "confirmed", "bot_token": "token", "uin": "uin"}
+    
+    get_side_effect = [
+        mock_qrcode_resp,
+        httpx.ReadTimeout("Timeout!"),
+        mock_status_success
+    ]
+    
+    with patch("builtins.input", side_effect=["y", ""]), \
+         patch("httpx.get", side_effect=get_side_effect), \
+         patch("builtins.print") as mock_print, \
+         patch("pathlib.Path.write_text") as mock_write:
+        
+        channel.run_login_flow(settings)
+        mock_print.assert_any_call("\n登录成功！配置已保存。")
+
+
+

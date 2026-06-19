@@ -14,6 +14,8 @@ from pathlib import Path
 
 from ..config import Settings
 from ..context_pool.retrieval import Retriever
+from ..permissions import PermissionManager, PermissionResult
+from ..approval import TUIApprovalHandler, ApprovalDecision
 from .memory import MemoryStore
 
 _MAX_OUTPUT = 12_000
@@ -60,6 +62,10 @@ class ToolKit:
         self.memory = memory
         self._plan: list[str] = []
         self._sub_agent_runner = sub_agent_runner
+        from .async_terminal import AsyncTerminal
+        self.terminal = AsyncTerminal()
+        self.permission_manager = PermissionManager(settings)
+        self.approval_handler = TUIApprovalHandler()
 
     # ------------------------------------------------------------------ paths
     def _resolve(self, path: str) -> Path:
@@ -119,9 +125,15 @@ class ToolKit:
             command: The shell command line to execute.
             timeout: Maximum seconds to wait before aborting.
         """
+        res = self.permission_manager.check_permission(command)
+        if res == PermissionResult.NEEDS_APPROVAL:
+            decision = self.approval_handler.request_approval(command)
+            if decision == ApprovalDecision.ALWAYS_ALLOW:
+                self.permission_manager.add_always_allow(command)
+            elif decision == ApprovalDecision.DENY:
+                return "ERROR: Command execution denied by user."
+
         try:
-            # Capture raw bytes (not text=True) and decode ourselves so a command
-            # whose output isn't valid in the locale codec can't crash the reader.
             proc = subprocess.run(
                 command,
                 shell=True,
@@ -136,6 +148,69 @@ class ToolKit:
         out = stdout + (("\n[stderr]\n" + stderr) if stderr else "")
         out = out[:_MAX_OUTPUT]
         return f"exit={proc.returncode}\n{out}".strip()
+
+    def spawn_terminal(self, command: str, timeout: int = 300) -> str:
+        """Launch a shell command in the background and return its terminal ID.
+
+        Args:
+            command: The command line to execute.
+            timeout: Maximum seconds before process is killed.
+        """
+        res = self.permission_manager.check_permission(command)
+        if res == PermissionResult.NEEDS_APPROVAL:
+            decision = self.approval_handler.request_approval(command)
+            if decision == ApprovalDecision.ALWAYS_ALLOW:
+                self.permission_manager.add_always_allow(command)
+            elif decision == ApprovalDecision.DENY:
+                return "ERROR: Command execution denied by user."
+
+        def on_finished(tid, code):
+            agent = getattr(self, "agent_instance", None)
+            if agent is not None and hasattr(agent, "on_terminal_finished"):
+                agent.on_terminal_finished(tid, code)
+
+        tid = self.terminal.spawn(command, self.settings.project_dir, timeout, on_finished=on_finished)
+        agent = getattr(self, "agent_instance", None)
+        if agent is not None:
+            active_ctx = getattr(agent, "active_im_context", None)
+            if active_ctx:
+                agent.terminal_contexts[tid] = active_ctx
+        return tid
+
+    def check_terminal(self, terminal_id: str) -> str:
+        """Read newly buffered output from a running background terminal.
+
+        Args:
+            terminal_id: The ID of the terminal returned by spawn_terminal.
+        """
+        return self.terminal.check_output(terminal_id)
+
+    def send_to_terminal(self, terminal_id: str, text: str) -> str:
+        """Send keys/input followed by a newline to a running background terminal.
+
+        Args:
+            terminal_id: The ID of the terminal.
+            text: The text/input to send.
+        """
+        return self.terminal.send_input(terminal_id, text)
+    def kill_terminal(self, terminal_id: str) -> str:
+        """Kill a running background terminal process.
+
+        Args:
+            terminal_id: The ID of the terminal.
+        """
+        return self.terminal.kill(terminal_id)
+
+    def push_notification(self, channel: str, target: str, message: str) -> str:
+        """Send a message or notification to a specific channel (e.g. feishu, wechat) and recipient.
+
+        Args:
+            channel: Channel name ('feishu' or 'wechat').
+            target: The target user or chat identifier.
+            message: The message body to send.
+        """
+        from .tools_push import push_notification_impl
+        return push_notification_impl(self.settings, channel, target, message)
 
     def update_plan(self, steps: list[str]) -> str:
         """Record the current step-by-step plan for the task.
@@ -246,6 +321,10 @@ class ToolKit:
             self.write_file,
             self.list_dir,
             self.run_command,
+            self.spawn_terminal,
+            self.check_terminal,
+            self.send_to_terminal,
+            self.kill_terminal,
             self.update_plan,
             self.get_plan,
             self.remember,
@@ -254,6 +333,7 @@ class ToolKit:
             self.web_search,
             self.spawn_sub_agent,
             self.reindex_context,
+            self.push_notification,
         ]
 
     def specs(self) -> list[dict]:

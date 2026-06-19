@@ -4,21 +4,17 @@ A beautiful command-line **coding agent**, built on [Google ADK](https://adk.dev
 and Gemini. `claude.md`-compatible, with a four-category context pool and
 model2vec vector retrieval at its core.
 
-> 支持 snh48 宋昕冉 谢谢喵
-
 ```
 ssr
 ┌────────────────────────── ✨ SSR Agent ✨ ──────────────────────────┐
 │  ██╗    ██╗███████╗██╗      ██████╗ ██████╗ ███╗   ███╗███████╗     │
 │  ...   Welcome To SSR   ...                                        │
-│                  支持 snh48 宋昕冉 谢谢喵                             │
 └────────────────────── powered by Google ADK · gemini ───────────────┘
 ```
 
 ## Features
 
-1. **Polished TUI** — `ssr` prints an ASCII-art *Welcome To SSR* banner with the
-   SNH48 subtitle, then drops into an interactive REPL.
+1. **Polished TUI** — `ssr` prints an ASCII-art *Welcome To SSR* banner, then drops into an interactive REPL.
 2. **Coding-agent core** — step planning, filesystem access, command execution,
    durable **MEMORY**, **sub-agent** spawning, and **Tavily** web search.
 3. **`claude.md`-compatible config** + skills discovered from `~/.agent/skills`,
@@ -76,9 +72,17 @@ ssr --experimental-acp   # run as an ACP server
 # background tasks (pm2)
 ssr task create nightly "summarise today's git log" --cron "0 22 * * *"
 
-# Feishu / Lark bot (WebSocket long connection — no webhook URL)
-ssr feishu configure     # set working dir, session id, app id (ak), app secret (sk)
-ssr feishu serve         # opens an outbound WS to Feishu and serves the agent
+# Unified Channels (Feishu / WeChat / etc.) - Note: `ssr feishu` is deprecated
+ssr channel config feishu  # configure Feishu channel (alias: configure)
+ssr channel on feishu      # start listening on Feishu channel (alias: serve)
+ssr channel config wechat  # configure WeChat channel (scanning QR code to log in; network-resilient status checks handling wait, scanned, expired, canceled, timeout, and customized error message responses; press Ctrl+C to cancel)
+ssr channel on wechat      # start listening on WeChat channel (with dynamic X-WECHAT-UIN headers, full base_info / client_id payload alignment, incoming image message decryption support, and auto-exit on session timeout)
+
+# Multi-Model configurations
+ssr models config        # interactively configure LLM models (Gemini, Anthropic, OpenAI)
+
+# OpenAI-compatible API server
+ssr serve --port 8000    # start a local OpenAI-compatible HTTP server
 
 # Remote control (connect to a dispatch server as a node)
 ssr rc                   # first run prompts for endpoint + token, then connects
@@ -87,6 +91,29 @@ ssr rc tags prod,gpu     # set this node's tags (applied on next connect)
 
 # Run EvalScope benchmark with custom runner
 python run_benchmark.py
+```
+
+### Multi-Model Configuration (`ssr models config`)
+
+Configure multiple LLM models (Gemini, Anthropic, and OpenAI format) interactively. Configured models are saved to `~/.ssr/models.json` and are used for agent execution with automatic retry and model fallback support.
+
+### OpenAI-Compatible HTTP Server (`ssr serve`)
+
+Expose the SSR Agent as a local OpenAI-compatible API server using FastAPI and Uvicorn. Exposes standard endpoints:
+- `GET /v1/models`: Retrieve the list of configured models.
+- `POST /v1/chat/completions`: Query the SSR Agent using OpenAI-compatible payloads.
+
+Supports both standard JSON response and server-sent event (SSE) streaming (`stream: true`).
+
+**Example Query:**
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default-gemini",
+    "messages": [{"role": "user", "content": "Write a hello world script in Python"}],
+    "stream": false
+  }'
 ```
 
 ### Remote control (`ssr rc`)
@@ -131,6 +158,18 @@ docker run --rm \
   python:3.12-slim bash run_in_docker.sh
 ```
 
+
+### System Rules
+
+The agent dynamically loads custom behavior rules from `~/.ssr/rules.md` (global) and `.ssr/rules.md` (project-level). The agent is strictly instructed to:
+- Avoid placeholders, mocks, or other fake fallback forms.
+- Report any command failures, package import issues, or image download errors directly to the user to handle.
+
+### Asynchronous Terminal (Background Commands)
+
+When the agent executes a background command via the `spawn_terminal` tool, it is monitored asynchronously. Upon completion of the process:
+- The agent is automatically woken up for a single turn with the terminal exit status.
+- The agent's generated response is pushed back to the corresponding channel (such as Feishu, WeChat, or Remote Control/RC client) from which the command was initiated.
 
 ### Session recording
 

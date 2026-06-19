@@ -1,0 +1,145 @@
+agent_config:
+  bridge:
+    proxy_host: 127.0.0.1
+    proxy_port: null
+  environment: local
+  environment_extra: {}
+  framework: ssr-agent
+  kwargs: {}
+  mode: external
+  timeout: 1800.0
+analysis_report: false
+api_url: https://generativelanguage.googleapis.com/v1beta/openai/
+chat_template: null
+collect_perf: true
+dataset_args:
+  swe_bench_verified:
+    aggregation: mean
+    data_statistics: null
+    dataset_id: princeton-nlp/SWE-bench_Verified
+    default_subset: default
+    description: '
+
+      ## Overview
+
+
+      SWE-bench Verified is a human-validated subset of 500 samples from SWE-bench,
+      designed to test systems'' ability to automatically resolve real-world GitHub
+      issues. Each sample represents a genuine bug fix or feature implementation from
+      popular Python repositories.
+
+
+      ## Task Description
+
+
+      - **Task Type**: Automated Software Engineering / Bug Fixing
+
+      - **Input**: GitHub issue description with repository context
+
+      - **Output**: Code patch (diff format) that resolves the issue
+
+      - **Repositories**: 12 popular Python projects (Django, Flask, Requests, etc.)
+
+
+      ## Key Features
+
+
+      - 500 human-validated Issue-Pull Request pairs
+
+      - Real-world bugs from production Python repositories
+
+      - Evaluation via unit test verification
+
+      - Docker-based isolated execution environments
+
+      - Tests both bug understanding and code modification skills
+
+
+      ## Evaluation Notes
+
+
+      - Requires `pip install swebench==4.1.0` before evaluation
+
+      - Docker images are built/pulled automatically for each repository
+
+      - Timeout of 1800 seconds (30 min) per instance
+
+      - See the [usage documentation](https://evalscope.readthedocs.io/en/latest/third_party/swe_bench.html)
+      for detailed setup instructions
+
+      - Supports both local image building and remote image pulling
+
+      '
+    eval_split: test
+    extra_params:
+      build_docker_images: true
+      dockerhub_username: swebench
+      force_arch: ''
+      inference_dataset_id: princeton-nlp/SWE-bench_oracle
+      pull_remote_images_if_available: true
+    few_shot_num: 0
+    few_shot_prompt_template: null
+    few_shot_random: false
+    filters: null
+    force_redownload: false
+    max_image_bytes: null
+    metric_list:
+    - acc
+    name: swe_bench_verified
+    output_types:
+    - generation
+    paper_url: null
+    pretty_name: SWE-bench_Verified
+    prompt_template: '{question}'
+    query_template: null
+    review_timeout: null
+    sample_example: null
+    sandbox_config: {}
+    shuffle: false
+    shuffle_choices: false
+    subset_list:
+    - default
+    system_prompt: null
+    tags:
+    - Coding
+    train_split: null
+dataset_dir: /root/.cache/modelscope/hub/datasets
+dataset_hub: modelscope
+datasets:
+- swe_bench_verified
+debug: false
+enable_progress_tracker: false
+eval_backend: Native
+eval_batch_size: 1
+eval_config: null
+eval_type: openai_api
+evalscope_version: 1.8.1
+generation_config:
+  batch_size: 1
+  temperature: 0.0
+ignore_errors: false
+judge_model_args: {}
+judge_strategy: auto
+judge_worker_num: null
+limit: 1
+model: gemini-3.1-flash-lite
+model_args: {}
+model_id: gemini-3.1-flash-lite
+model_task: text_generation
+no_timestamp: false
+repeats: 1
+rerun_review: false
+sandbox:
+  default_config: {}
+  enabled: false
+  engine: docker
+  manager_config: {}
+  pool_size: null
+sandbox_manager_config: {}
+sandbox_type: docker
+seed: 42
+stream: null
+timeout: null
+use_cache: null
+use_sandbox: false
+work_dir: ./outputs/20260617_141637

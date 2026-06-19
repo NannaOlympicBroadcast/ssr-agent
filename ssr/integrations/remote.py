@@ -489,6 +489,9 @@ class RemoteNode:
                 extra = {"name": ev.get("name", "")}
             elif kind == "sub_agent":
                 data = _truncate(ev.get("task", ""))
+            elif kind == "wakeup":
+                data = ev.get("text", "")
+                kind = "reply"
             else:
                 return
             try:
@@ -519,6 +522,7 @@ class RemoteNode:
         if agent is None:
             raise KeyError(f"unknown chat: {chat_id} (call chat.start first)")
         attachments = attachments or []
+        agent.active_im_context = ("rc", chat_id)
         if attachments:
             parts = _build_chat_parts(agent, message, attachments)
             reply = agent.run_parts(parts)  # records both turns into the session

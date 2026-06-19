@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ssr-agent"
 version = "0.1.0"
-description = "SSR Agent — a beautiful command-line coding agent built on Google ADK. 支持 snh48 宋昕冉 谢谢喵"
+description = "SSR Agent — a beautiful command-line coding agent built on Google ADK."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

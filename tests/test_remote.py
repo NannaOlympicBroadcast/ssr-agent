@@ -85,7 +85,9 @@ def test_run_command(tmp_path):
 
 
 def test_run_command_timeout():
-    res = remote._run_command("sleep 5", "", 1)
+    import sys
+    cmd = f'"{sys.executable}" -c "import time; time.sleep(5)"'
+    res = remote._run_command(cmd, "", 1)
     assert res["exit"] == -1
     assert "timed out" in res["output"]
 
