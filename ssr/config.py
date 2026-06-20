@@ -36,6 +36,10 @@ SKILL_DIRS = (
 # Configuration documents loaded into the "configurations" context pool.
 CONFIG_DOC_NAMES = ("claude.md", "CLAUDE.md", "soul.md", "profile.md")
 
+# Reference-material catalogue loaded into the "refs" context pool. A REFS.md is
+# a markdown table describing reference materials (name / location / content).
+REFS_DOC_NAMES = ("REFS.md", "refs.md")
+
 
 def ssr_home() -> Path:
     """Return the ``~/.ssr`` home directory, honouring ``SSR_HOME`` override."""
@@ -90,6 +94,14 @@ class Settings:
     @property
     def feishu_config(self) -> Path:
         return self.home / "feishu.json"
+
+    @property
+    def refs_file(self) -> Path:
+        return self.home / "REFS.md"
+
+    @property
+    def project_refs_file(self) -> Path:
+        return self.project_dir / "REFS.md"
 
     @property
     def rules_file(self) -> Path:

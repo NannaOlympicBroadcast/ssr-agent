@@ -489,6 +489,16 @@ class RemoteNode:
                 extra = {"name": ev.get("name", "")}
             elif kind == "sub_agent":
                 data = _truncate(ev.get("task", ""))
+            elif kind == "file":
+                # Stream a file the agent wants to hand to the user; the browser
+                # turns this into a download.
+                data = ev.get("name", "file")
+                extra = {
+                    "data_b64": ev.get("data_b64", ""),
+                    "size": ev.get("size", 0),
+                    "mime": ev.get("mime", "application/octet-stream"),
+                    "caption": ev.get("caption", ""),
+                }
             elif kind == "wakeup":
                 data = ev.get("text", "")
                 kind = "reply"

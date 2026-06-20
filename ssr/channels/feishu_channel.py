@@ -35,7 +35,10 @@ class FeishuChannel(AbstractChannel):
         if cfg is None or not cfg.app_id or not cfg.app_secret:
             raise SystemExit("Feishu not configured. Run: ssr channel config feishu")
 
-        settings.project_dir = Path(cfg.default_cwd).expanduser()
+        # default_cwd is only a *starting* directory, not a hard restriction:
+        # the agent may switch with /project and run commands elsewhere.
+        if cfg.default_cwd:
+            settings.project_dir = Path(cfg.default_cwd).expanduser()
         self.api = lark.Client.builder().app_id(cfg.app_id).app_secret(cfg.app_secret).build()
         agent = SSRAgent(settings)
 

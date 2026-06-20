@@ -24,6 +24,8 @@ HELP = {
     "/session": "Manage sessions: /session <list|resume <id>|new>",
     "/goal": "Run until a goal is satisfied: /goal <goal description>",
     "/bypass-permissions": "Bypass command approval (toggle turbo mode)",
+    "/stop": "Interrupt the running task (also typeable while the agent runs)",
+    "/btw": "Ask a side question while the main task keeps running: /btw <question>",
     "/approve": "Approve the pending command",
     "/alwaysallow": "Always allow the pending command pattern",
     "/disallow": "Deny the pending command: /disallow [reason]",
@@ -163,6 +165,18 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
         else:
             console.print("[yellow]Usage: /model [list|switch <id>][/yellow]")
 
+    elif cmd in ("/stop", "/cancel"):
+        if agent.request_stop():
+            console.print("[yellow]⏹ stop requested.[/yellow]")
+        else:
+            console.print("[dim]Nothing is running.[/dim]")
+
+    elif cmd == "/btw":
+        if not args:
+            console.print("[yellow]Usage: /btw <question>[/yellow]")
+        else:
+            console.print(agent.answer_side_question(" ".join(args)))
+
     elif cmd == "/bypass-permissions":
         pm = agent.toolkit.permission_manager
         pm.turbo_mode = not pm.turbo_mode
@@ -234,17 +248,20 @@ def _print_sessions(agent: SSRAgent, console: Console) -> None:
         console.print("[dim]No recorded sessions yet.[/dim]")
         return
     table = Table(title="Recorded sessions", header_style="bold cyan")
+    table.add_column("Session ID", style="cyan", no_wrap=True)
     table.add_column("Updated")
     table.add_column("Turns", justify="right")
     table.add_column("Title")
     for s in sessions[:30]:
         marker = " [green]●[/green]" if s.get("id") == agent.session_id else ""
         table.add_row(
+            s.get("id") or "—",
             (s.get("updated") or s.get("created") or "")[:19].replace("T", " "),
             str(s.get("turns", 0)),
             (s.get("title") or "(untitled)") + marker,
         )
     console.print(table)
+    console.print("[dim]Resume with /session resume <session-id>[/dim]")
 
 
 def _print_status(agent: SSRAgent, console: Console) -> None:

@@ -2,7 +2,7 @@ import json
 import tempfile
 from pathlib import Path
 from ssr.config import Settings
-from ssr.plugins.manager import install_builtin_plugins
+from ssr.plugins import install_builtin_plugins
 from ssr.integrations.mcp_client import (
     MCPManager,
     find_plugin_mcp_configs,

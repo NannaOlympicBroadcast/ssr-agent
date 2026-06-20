@@ -507,8 +507,19 @@ class MCPManager:
 
     @classmethod
     def from_config(cls, config_path: Path, timeout: float = _DEFAULT_TIMEOUT) -> "MCPManager":
+        return cls.from_server_configs(_read_server_configs(config_path), timeout=timeout)
+
+    @classmethod
+    def from_server_configs(
+        cls, server_configs: dict[str, dict], timeout: float = _DEFAULT_TIMEOUT
+    ) -> "MCPManager":
+        """Build a manager from an already-merged ``{name: cfg}`` mapping.
+
+        This is the shared path for both ``mcp.json`` and bundled/user *plugins*
+        (which contribute additional ``mcpServers``).
+        """
         servers: list[MCPServer | MCPSSEServer] = []
-        for name, cfg in _read_server_configs(config_path).items():
+        for name, cfg in (server_configs or {}).items():
             if cfg.get("disabled"):
                 continue
             if "url" in cfg:
@@ -539,7 +550,25 @@ class MCPManager:
     @classmethod
     def from_settings(cls, settings: Any, timeout: float = _DEFAULT_TIMEOUT) -> "MCPManager":
         servers: list[MCPServer | MCPSSEServer] = []
-        
+
+        # Lazily resolve ``${namespace.key}`` credential placeholders from the
+        # shared ``~/.ssr/<namespace>.json`` files (used by e.g. the miot plugin).
+        try:
+            from ..plugins import _resolve_placeholders, load_credentials
+
+            _creds_cache: dict[str, dict] = {}
+
+            def _creds_for(ns: str) -> dict:
+                if ns not in _creds_cache:
+                    _creds_cache[ns] = load_credentials(settings, ns)
+                return _creds_cache[ns]
+
+            def _resolve_creds(cfg: dict) -> dict:
+                return _resolve_placeholders(cfg, _creds_for)
+        except Exception:  # pragma: no cover - plugins module always present
+            def _resolve_creds(cfg: dict) -> dict:
+                return cfg
+
         # 1. Load from main mcp.json
         if hasattr(settings, "mcp_config"):
             for name, cfg in _read_server_configs(settings.mcp_config).items():
@@ -574,6 +603,7 @@ class MCPManager:
         for plugin_dir, servers_dict in plugin_configs:
             dirname = str(plugin_dir.resolve()).replace("\\", "/")
             for name, cfg in servers_dict.items():
+                cfg = _resolve_creds(cfg)
                 if cfg.get("disabled"):
                     continue
                 if "url" in cfg:
