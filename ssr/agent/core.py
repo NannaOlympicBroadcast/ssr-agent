@@ -32,6 +32,9 @@ Operating principles:
 4. Persist durable facts/preferences with `remember`.
 5. Use `web_search` (Tavily) for up-to-date external information.
 6. Delegate self-contained subtasks to `spawn_sub_agent`.
+7. Coordinate asynchronously over the event bus: `bus_publish` to emit events,
+   `bus_subscribe` to be woken when matching events arrive, and `bus_wait` to
+   suspend until an event happens (e.g. waiting on another agent or task).
 Be concise. Show your reasoning through the plan and tool calls, not verbosity.
 """
 
@@ -73,9 +76,101 @@ class SSRAgent:
         # Interruption + concurrent side-question (/stop, /btw) coordination.
         self._stop_event = threading.Event()
         self._busy = threading.Event()
+        # Built-in event bus. Every running agent owns one; it is optionally
+        # bridged to a remote bus server (SSR_BUS_URL / settings.bus_url) so
+        # agents, tasks and external programs can communicate asynchronously.
+        self._init_bus()
+
+    # ------------------------------------------------------------------- bus
+    def _init_bus(self) -> None:
+        """Create the agent's built-in bus and bridge it to a remote if set."""
+        import uuid as _uuid
+
+        from ..bus import MessageBus, RemoteBusBridge
+
+        self.agent_id = f"agent:{_uuid.uuid4().hex[:8]}"
+        self.bus = MessageBus(name=self.agent_id, source=self.agent_id)
+        self._bus_bridge = None
+        # Listeners that should wake the agent with a new turn when they fire.
+        self._bus_notify_listeners: dict[str, str] = {}  # listener_id -> pattern
+        url = getattr(self.settings, "bus_url", None)
+        if url:
+            try:
+                self._bus_bridge = RemoteBusBridge(self.bus, url).start()
+            except Exception as e:  # never let bus setup break the agent
+                self._emit("warning", text=f"Bus: could not connect to {url}: {e}")
+
+    def connect_bus(self, url: str) -> str:
+        """Bridge the built-in bus to a remote bus server at ``url``."""
+        from ..bus import RemoteBusBridge
+
+        if self._bus_bridge is not None:
+            try:
+                self._bus_bridge.stop()
+            except Exception:
+                pass
+            self._bus_bridge = None
+        self._bus_bridge = RemoteBusBridge(self.bus, url).start()
+        self.settings.bus_url = url
+        return f"Bus bridged to {url}."
+
+    def subscribe_and_notify(self, pattern: str, description: str = "") -> str:
+        """Subscribe so that each matching event wakes the agent with a new turn.
+
+        This is how an agent "is triggered by" bus events: when an event matches,
+        a background turn is started informing the agent of the event (mirroring
+        how completed background terminals wake the agent).
+        """
+        def _on_event(event):
+            self._on_bus_event(event)
+
+        listener_id = self.bus.subscribe(pattern, _on_event, description=description or "agent notify")
+        self._bus_notify_listeners[listener_id] = pattern
+        return listener_id
+
+    def _on_bus_event(self, event) -> None:
+        """Wake the agent with a turn describing a bus event (notify listeners)."""
+        import json as _json
+        import threading as _threading
+        import time as _time
+
+        self._emit("bus_event", tag="ssr", topic=event.topic, source=event.source)
+        if self.session_id is None and not self._busy.is_set():
+            # No live session to wake; the event is still recorded in bus history.
+            return
+
+        def run_wakeup():
+            _time.sleep(0.2)
+            try:
+                payload = _json.dumps(event.payload, ensure_ascii=False)
+            except Exception:
+                payload = str(event.payload)
+            prompt = (
+                f"[Bus] Event received on topic '{event.topic}' from {event.source}. "
+                f"Payload: {payload}. Decide whether and how to act on it."
+            )
+            try:
+                reply = self.run(prompt)
+                self._emit("thinking", tag="ssr", text=f"\n[ssr ▸] {reply}\n")
+                active_ctx = getattr(self, "active_im_context", None)
+                if active_ctx:
+                    from .tools_push import push_notification_impl
+
+                    push_notification_impl(self.settings, active_ctx[0], active_ctx[1], reply)
+            except Exception:
+                pass
+
+        _threading.Thread(target=run_wakeup, daemon=True).start()
 
     def close(self) -> None:
-        """Tear down all managed MCP server subprocesses."""
+        """Tear down all managed MCP server subprocesses and the bus bridge."""
+        bridge = getattr(self, "_bus_bridge", None)
+        if bridge is not None:
+            try:
+                bridge.stop()
+            except Exception:
+                pass
+            self._bus_bridge = None
         manager = getattr(self, "mcp_manager", None)
         if manager is not None:
             manager.shutdown()

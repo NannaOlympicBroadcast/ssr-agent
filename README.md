@@ -236,6 +236,46 @@ When the agent executes a background command via the `spawn_terminal` tool, it i
 - The agent is automatically woken up for a single turn with the terminal exit status.
 - The agent's generated response is pushed back to the corresponding channel (such as Feishu, WeChat, or XiaoAI) from which the command was initiated.
 
+### Event Bus (async agent & task coordination)
+
+Every running agent owns a built-in **event bus** for asynchronous coordination
+between agents, tasks, and external programs. Events are **structured** and travel
+over **JSON-RPC 2.0**; topics are dotted names with wildcards (`*` = one segment,
+`**` = the rest, e.g. `task.*`, `agent.**`).
+
+**Agent tools** (the model can call these):
+- `bus_publish(topic, payload_json)` — emit an event to communicate.
+- `bus_subscribe(pattern)` — register a listener; matching events **wake the agent**
+  with a new turn (the same wake mechanism used for finished background terminals).
+- `bus_wait(pattern, timeout)` — **suspend the current session** until a matching
+  event arrives (or timeout), then resume with the event.
+- `bus_unsubscribe(listener_id)`, `bus_listeners()`, `bus_history(pattern)`.
+
+**Remote bus server.** Run a broker that connects many peers:
+```bash
+ssr bus serve --host 0.0.0.0 --port 8765      # start the broker
+ssr bus send task.done '{"id": 42}'           # publish from the CLI
+ssr bus listen 'task.*'                        # stream matching events
+ssr bus status                                 # ping + recent events
+```
+Point an agent at a broker with `SSR_BUS_URL=ws://host:8765` (or `/bus connect
+ws://host:8765` in the TUI); its built-in bus is then bridged so local and remote
+events flow both ways (de-duplicated by event id, so there are no echo loops).
+
+**TUI slash command:** `/bus send|listen|wait|ls|history|connect|status`.
+
+**External programmatic API.** Any external program or other AI agent can drive
+the bus in code via the synchronous client — no `async`/`await` needed:
+```python
+from ssr.bus import BusClient
+
+client = BusClient("ws://localhost:8765", source="my-script").connect()
+client.publish("task.started", {"id": 42})
+client.subscribe("task.*", lambda ev: print("event:", ev.topic, ev.payload))
+event = client.wait_for("task.done", timeout=30)   # block for one event
+client.close()
+```
+
 ### Hooks Mechanism
 
 Allows executing arbitrary shell commands configured in global `~/.ssr/hooks.json` or project-level `.ssr/hooks.json` on key agent events (`UserPromptSubmit` at the start of a prompt and `Stop` at the end of a reply). The event payload is passed to the command's standard input as a JSON string.
@@ -306,7 +346,8 @@ the TUI with `/sessions`; `/clear` starts a fresh session.
 ### Slash commands (inside the TUI)
 `/help` `/index [category]` `/status` `/context <mode> <query>`
 `/attach <path> [prompt]` (image/audio input; aliases `/image` `/audio`)
-`/skills` `/memory` `/plan` `/clear` `/quit`
+`/skills` `/memory` `/plan` `/bus <send|listen|wait|ls|history|connect|status>`
+`/clear` `/quit`
 
 ### Multimodal input (image + voice)
 Gemini is multimodal, so SSR accepts images and audio:

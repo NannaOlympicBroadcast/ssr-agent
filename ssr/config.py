@@ -56,6 +56,7 @@ class Settings:
     gemini_api_key: str | None = None
     tavily_api_key: str | None = None
     default_model: str = DEFAULT_MODEL_FALLBACK
+    bus_url: str | None = None  # remote bus server, e.g. ws://host:8765 (SSR_BUS_URL)
     extra: dict[str, str] = field(default_factory=dict)
 
     # --- derived paths -----------------------------------------------------
@@ -160,6 +161,7 @@ def load_settings(project_dir: str | os.PathLike | None = None) -> Settings:
         gemini_api_key=os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"),
         tavily_api_key=os.environ.get("TAVILY_API_KEY"),
         default_model=os.environ.get("DEFAULT_MODEL", DEFAULT_MODEL_FALLBACK),
+        bus_url=os.environ.get("SSR_BUS_URL") or None,
     )
     # Make the key visible to google-genai / google-adk which look up GOOGLE_API_KEY.
     if settings.gemini_api_key:
