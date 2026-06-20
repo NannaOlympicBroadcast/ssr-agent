@@ -144,17 +144,21 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
             table.add_column("Provider")
             table.add_column("Model")
             table.add_column("API Key Env")
+            table.add_column("Direct Key")
             table.add_column("Base URL")
             table.add_column("Status")
             
             primary = agent.models_config.get_primary()
             for m in agent.models_config.list_models():
                 status = "[green]primary[/green]" if m.id == primary.id else "fallback"
+                key = getattr(m, "api_key", None)
+                masked_key = f"{key[:4]}...{key[-4:]}" if key and len(key) > 8 else ("****" if key else "—")
                 table.add_row(
                     m.id,
                     m.provider,
                     m.model,
                     m.api_key_env,
+                    masked_key,
                     m.base_url or "—",
                     status
                 )

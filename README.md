@@ -99,6 +99,10 @@ python run_benchmark.py
 
 Configure multiple LLM models (Gemini, Anthropic, and OpenAI format) interactively. Configured models are saved to `~/.ssr/models.json` and are used for agent execution with automatic retry and model fallback support.
 
+You can set up API credentials in two ways:
+1. **Environment Variables**: Provide the name of the environment variable containing your API key (e.g., `GEMINI_API_KEY`).
+2. **Direct API Keys**: Input the actual API key directly. This key will be saved directly into the config file. If you accidentally paste your actual API key (e.g., starting with `sk-` or `AIza`) into the environment variable field, the configuration tool will automatically detect it, save it as a direct key, and set the environment variable name to its provider's default name.
+
 ### OpenAI-Compatible HTTP Server (`ssr serve`)
 
 Expose the SSR Agent as a local OpenAI-compatible API server using FastAPI and Uvicorn. Exposes standard endpoints:

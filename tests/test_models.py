@@ -48,3 +48,23 @@ def test_models_config_lifecycle():
         cfg2.remove_model("default-gemini")
         assert len(cfg2.models) == 1
         assert cfg2.models[0].id == "my-claude"
+
+
+def test_is_actual_api_key():
+    from ssr.cli import is_actual_api_key
+
+    # Valid env var names (return False)
+    assert not is_actual_api_key("GEMINI_API_KEY")
+    assert not is_actual_api_key("OPENAI_KEY")
+    assert not is_actual_api_key("MY_KEY_123")
+    assert not is_actual_api_key("key")
+
+    # Direct keys (return True)
+    assert is_actual_api_key("sk-ant-sid01-xxxxxxxx")
+    assert is_actual_api_key("AIzaSyB3hD68zL3R9qJ3bN5mP8sT2uW4vX6yZ8")
+    assert is_actual_api_key("AIzaSyD-xxx")
+    assert is_actual_api_key("sk-proj-xxxxxxxxx")
+    assert is_actual_api_key("sk-1234567890abcdef1234567890abcdef")
+    assert is_actual_api_key("some.key.with.dots")
+    assert is_actual_api_key("some-key-with-dashes")
+

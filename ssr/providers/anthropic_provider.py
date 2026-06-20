@@ -13,7 +13,7 @@ from ssr.integrations.mcp_client import is_mcp_tool_name
 class AnthropicProvider(AbstractProvider):
     def __init__(self, settings, entry, agent_instance=None):
         super().__init__(settings, entry, agent_instance)
-        api_key = os.environ.get(entry.api_key_env) or os.environ.get("ANTHROPIC_API_KEY") or "fake-key"
+        api_key = getattr(entry, "api_key", None) or os.environ.get(entry.api_key_env) or os.environ.get("ANTHROPIC_API_KEY") or "fake-key"
         
         import anthropic
         self.client = anthropic.Anthropic(api_key=api_key)

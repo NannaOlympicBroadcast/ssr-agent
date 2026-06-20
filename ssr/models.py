@@ -14,6 +14,7 @@ class ModelEntry:
     model: str
     api_key_env: str
     base_url: str | None = None
+    api_key: str | None = None
 
 class ModelsConfig:
     def __init__(self, settings: Settings):

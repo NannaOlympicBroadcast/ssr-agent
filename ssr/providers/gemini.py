@@ -12,7 +12,7 @@ from ssr.integrations.mcp_client import is_mcp_tool_name
 class GeminiProvider(AbstractProvider):
     def __init__(self, settings, entry, agent_instance=None):
         super().__init__(settings, entry, agent_instance)
-        api_key = os.environ.get(entry.api_key_env) or settings.gemini_api_key
+        api_key = getattr(entry, "api_key", None) or os.environ.get(entry.api_key_env) or settings.gemini_api_key
         self.client = genai.Client(api_key=api_key)
 
     def complete(

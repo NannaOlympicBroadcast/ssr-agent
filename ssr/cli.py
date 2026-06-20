@@ -238,6 +238,24 @@ def cmd_rc(args, settings: Settings, console: Console) -> int:
     return remote.run_remote(settings, reconfigure=bool(getattr(args, "reconfigure", False)))
 
 
+def is_actual_api_key(value: str) -> bool:
+    """Detect if value is an actual API key rather than an environment variable name."""
+    import re
+    if not value:
+        return False
+    # If it starts with common API key prefixes, it's definitely an API key
+    if value.startswith(("sk-", "AIza")):
+        return True
+    # If it contains lowercase letters and is longer than 20 characters
+    if any(c.islower() for c in value) and len(value) > 20:
+        return True
+    # Env var names are typically uppercase alphanumeric plus underscores.
+    # If it has characters that are not allowed in environment variables (like dots, hyphens, slashes, spaces)
+    if not re.match(r"^[a-zA-Z0-9_]+$", value):
+        return True
+    return False
+
+
 def cmd_models(args, settings: Settings, console: Console) -> int:
     from .models import ModelsConfig, ModelEntry
 
@@ -252,16 +270,20 @@ def cmd_models(args, settings: Settings, console: Console) -> int:
             table.add_column("Provider", style="green")
             table.add_column("Model Name", style="magenta")
             table.add_column("API Key Env", style="yellow")
+            table.add_column("Direct Key", style="cyan")
             table.add_column("Base URL", style="blue")
             table.add_column("Type", style="bold red")
 
             for m in cfg.list_models():
                 is_primary = "Primary" if m.id == cfg.primary else "Fallback"
+                key = getattr(m, "api_key", None)
+                masked_key = f"{key[:4]}...{key[-4:]}" if key and len(key) > 8 else ("****" if key else "-")
                 table.add_row(
                     m.id,
                     m.provider,
                     m.model,
                     m.api_key_env,
+                    masked_key,
                     m.base_url or "-",
                     is_primary
                 )
@@ -296,6 +318,25 @@ def cmd_models(args, settings: Settings, console: Console) -> int:
                     if not api_key_env:
                         console.print("[red]API key environment variable name cannot be empty.[/red]")
                         continue
+
+                    is_direct_key = False
+                    api_key = None
+                    if is_actual_api_key(api_key_env):
+                        api_key = api_key_env
+                        default_envs = {
+                            "gemini": "GEMINI_API_KEY",
+                            "anthropic": "ANTHROPIC_API_KEY",
+                            "openai": "OPENAI_API_KEY"
+                        }
+                        env_name = default_envs.get(provider, "API_KEY")
+                        console.print(f"[yellow]Detected that the input looks like an actual API key. Saving as direct API key and setting API key environment variable name to '{env_name}'.[/yellow]")
+                        api_key_env = env_name
+                        is_direct_key = True
+
+                    if not is_direct_key:
+                        api_key_input = input("Enter API key directly (optional, press Enter to use environment variable): ").strip()
+                        api_key = api_key_input if api_key_input else None
+
                     base_url = input("Enter base URL (optional, press Enter to skip): ").strip()
                     base_url = base_url if base_url else None
 
@@ -304,6 +345,7 @@ def cmd_models(args, settings: Settings, console: Console) -> int:
                         provider=provider,
                         model=model_name,
                         api_key_env=api_key_env,
+                        api_key=api_key,
                         base_url=base_url
                     )
                     cfg.add_model(entry)
@@ -344,9 +386,10 @@ def cmd_serve(args, settings: Settings, console: Console) -> int:
     primary = cfg.get_primary()
 
     import os
-    if not os.environ.get(primary.api_key_env):
-        console.print(f"[red]Error: Primary model '{primary.id}' requires the environment variable '{primary.api_key_env}', which is not set.[/red]")
-        console.print(f"Please configure it in ~/.ssr/.env or export it.")
+    has_api_key = getattr(primary, "api_key", None) or os.environ.get(primary.api_key_env)
+    if not has_api_key:
+        console.print(f"[red]Error: Primary model '{primary.id}' requires either a direct API key or the environment variable '{primary.api_key_env}', but neither is set.[/red]")
+        console.print(f"Please configure a direct API key using 'ssr models config' or set the environment variable in ~/.ssr/.env.")
         return 1
 
     from .serve import run_server
