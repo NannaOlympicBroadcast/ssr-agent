@@ -42,7 +42,7 @@ where = ["."]
 include = ["ssr*"]
 
 [tool.setuptools.package-data]
-"ssr" = ["builtin_skills/**/*", "assets/**/*"]
+"ssr" = ["builtin_skills/**/*", "builtin_plugins/**/*", "assets/**/*"]
 
 [tool.ruff]
 line-length = 100
@@ -50,3 +50,4 @@ target-version = "py310"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+norecursedirs = ["ssr/builtin_plugins"]

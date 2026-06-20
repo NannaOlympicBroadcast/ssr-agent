@@ -12,6 +12,7 @@ from . import __version__
 from .banner import render_banner
 from .config import Settings, load_settings, missing_required
 from .skills.manager import install_builtin_skills
+from .plugins import install_builtin_plugins
 
 
 def _short(val, limit: int = 120) -> str:
@@ -72,16 +73,14 @@ def _first_run_setup(settings: Settings, console: Console) -> None:
     installed = install_builtin_skills(settings.skills_dir)
     if installed:
         console.print(f"[green]Installed built-in skills:[/green] {', '.join(installed)}")
-    from .plugins import install_builtin_plugins
-    plugins = install_builtin_plugins(settings.plugins_dir)
-    if plugins:
-        console.print(f"[green]Installed built-in plugins:[/green] {', '.join(plugins)}")
+    installed_plugins = install_builtin_plugins(settings.plugins_dir)
+    if installed_plugins:
+        console.print(f"[green]Installed built-in plugins:[/green] {', '.join(installed_plugins)}")
 
 
 def cmd_init(args, settings: Settings, console: Console) -> int:
     _first_run_setup(settings, console)
     install_builtin_skills(settings.skills_dir, force=True)
-    from .plugins import install_builtin_plugins
     install_builtin_plugins(settings.plugins_dir, force=True)
     console.print(f"[green]✓[/green] SSR home ready at [bold]{settings.home}[/bold]")
     console.print(f"  Edit [bold]{settings.env_file}[/bold] to add GEMINI_API_KEY / TAVILY_API_KEY")
