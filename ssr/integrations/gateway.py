@@ -95,6 +95,27 @@ def service_id(name: str) -> str:
 
 
 # ----------------------------------------------------------------- run gateway
+def _redirect_headless_output(settings: Settings, name: str) -> None:
+    """Point stdout/stderr at the gateway log when launched without a console.
+
+    On Windows the service runs under ``pythonw.exe`` (windowless) via a hidden
+    VBScript launcher, so ``sys.stdout`` / ``sys.stderr`` are ``None``. Channel
+    logging writes to ``sys.stdout``; redirect both to the log file so nothing is
+    lost and no console window is needed.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        log = logs_dir(settings) / f"gateway-{name}.log"
+        stream = open(log, "a", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
 def run_gateway(settings: Settings, name: str) -> int:
     """Foreground entrypoint executed by the system service: serve the channel."""
     import threading
@@ -105,6 +126,9 @@ def run_gateway(settings: Settings, name: str) -> int:
         raise SystemExit(
             f"未找到网关 '{name}'。请先安装： ssr gateway install {name} --channel <feishu|wechat|xiaomi|all>"
         )
+
+    # When launched headless (pythonw, no console) capture output to the log.
+    _redirect_headless_output(settings, name)
 
     import ssr.channels  # noqa: F401 — trigger channel registration
     from ssr.channels.registry import registry
@@ -140,6 +164,35 @@ def _exec_args(name: str) -> list[str]:
     return [sys.executable, "-m", "ssr", "gateway", "run", name]
 
 
+def format_bytes(n: int | None) -> str:
+    """Human-readable byte size (e.g. ``142.3 MB``); ``-`` for unknown."""
+    if n is None:
+        return "-"
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit in ("B", "KB") else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _rss_from_proc(pid: int) -> int | None:
+    """Read VmRSS (bytes) for *pid* from ``/proc`` (Linux)."""
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text("utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                kb = int(line.split()[1])
+                return kb * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _empty_stats() -> dict:
+    return {"running": False, "pid": None, "rss": None, "threads": None,
+            "cpu_percent": None, "source": None}
+
+
 class ServiceManager:
     backend = "none"
 
@@ -163,6 +216,10 @@ class ServiceManager:
 
     def status(self, settings: Settings, name: str) -> str:  # pragma: no cover
         raise NotImplementedError
+
+    def stats(self, settings: Settings, name: str) -> dict:
+        """Return live resource usage: running / pid / rss(bytes) / source."""
+        return _empty_stats()
 
 
 class _NullManager(ServiceManager):
@@ -271,6 +328,28 @@ class SystemdManager(ServiceManager):
         res = _run(["systemctl", "--user", "is-active", f"{service_id(name)}.service"])
         return (res.stdout or res.stderr).strip() or "unknown"
 
+    def stats(self, settings: Settings, name: str) -> dict:
+        st = _empty_stats()
+        sid = f"{service_id(name)}.service"
+        res = _run(["systemctl", "--user", "show", sid,
+                    "-p", "MainPID", "-p", "MemoryCurrent", "-p", "ActiveState"])
+        props: dict[str, str] = {}
+        for line in res.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k] = v.strip()
+        pid = int(props.get("MainPID", "0") or 0)
+        st["running"] = props.get("ActiveState") == "active" and pid > 0
+        st["pid"] = pid or None
+        mc = props.get("MemoryCurrent", "")
+        if mc.isdigit() and int(mc) < (1 << 63):  # systemd sentinel = 2**64-1
+            st["rss"] = int(mc)
+            st["source"] = "systemd MemoryCurrent (cgroup)"
+        elif pid:
+            st["rss"] = _rss_from_proc(pid)
+            st["source"] = "/proc VmRSS"
+        return st
+
 
 class LaunchdManager(ServiceManager):
     backend = "launchd"
@@ -346,6 +425,29 @@ class LaunchdManager(ServiceManager):
             return "not loaded"
         return "loaded (running)" if '"PID"' in res.stdout else "loaded"
 
+    def stats(self, settings: Settings, name: str) -> dict:
+        st = _empty_stats()
+        res = _run(["launchctl", "list", self._label(name)])
+        if res.returncode != 0:
+            return st
+        pid = None
+        for line in res.stdout.splitlines():
+            s = line.strip()
+            if s.startswith('"PID"') and "=" in s:
+                try:
+                    pid = int(s.split("=", 1)[1].strip().rstrip(";").strip())
+                except ValueError:
+                    pid = None
+        st["pid"] = pid
+        st["running"] = pid is not None
+        if pid:
+            r = _run(["ps", "-o", "rss=", "-p", str(pid)])
+            out = r.stdout.strip()
+            if out.isdigit():
+                st["rss"] = int(out) * 1024  # ps reports KB
+                st["source"] = "ps rss"
+        return st
+
 
 class WindowsTaskManager(ServiceManager):
     backend = "Scheduled Task (schtasks)"
@@ -356,21 +458,36 @@ class WindowsTaskManager(ServiceManager):
     def _task_name(self, name: str) -> str:
         return service_id(name)
 
+    def _interpreter(self) -> str:
+        """Prefer ``pythonw.exe`` (no console window) over ``python.exe``."""
+        exe = Path(sys.executable)
+        pyw = exe.with_name("pythonw.exe")
+        return str(pyw) if pyw.exists() else sys.executable
+
     def _wrapper_path(self, settings: Settings, name: str) -> Path:
         d = settings.home / "gateways"
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{name}.cmd"
 
     def _write_wrapper(self, settings: Settings, gw: Gateway) -> Path:
+        """Write the ``.cmd`` the scheduled task runs.
+
+        Starts with ``@echo off`` to keep the console clean, sets SSR_HOME /
+        extra env / cwd, then uses ``start "" /b`` to launch the **windowless**
+        ``pythonw.exe`` and let ``cmd`` exit immediately — so only a brief
+        console flash appears at logon instead of a persistent window. Output is
+        redirected to the gateway log (``run_gateway`` also redirects when
+        running under pythonw, which has no console).
+        """
         path = self._wrapper_path(settings, gw.name)
+        exe = self._interpreter()
         log = logs_dir(settings) / f"gateway-{gw.name}.log"
         lines = ["@echo off", f'set "SSR_HOME={settings.home}"']
         for k, v in (gw.env or {}).items():
             lines.append(f'set "{k}={v}"')
         if gw.cwd:
             lines.append(f'cd /d "{gw.cwd}"')
-        exec_args = " ".join(f'"{a}"' if " " in a else a for a in _exec_args(gw.name))
-        lines.append(f'{exec_args} >> "{log}" 2>&1')
+        lines.append(f'start "" /b "{exe}" -m ssr gateway run {gw.name} >> "{log}" 2>&1')
         path.write_text("\r\n".join(lines) + "\r\n", "utf-8")
         return path
 
@@ -378,12 +495,16 @@ class WindowsTaskManager(ServiceManager):
         wrapper = self._write_wrapper(settings, gw)
         tn = self._task_name(gw.name)
         res = _run([
-            "schtasks", "/Create", "/TN", tn, "/TR", str(wrapper),
+            "schtasks", "/Create", "/TN", tn, "/TR", f'cmd /c "{wrapper}"',
             "/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
         ], shell=True)
         if res.returncode != 0:
             return f"[!] 创建计划任务失败：{res.stderr.strip() or res.stdout.strip()}"
-        msg = f"已创建 Windows 计划任务 {tn}（登录时自动启动）。\n包装脚本： {wrapper}"
+        msg = (
+            f"已创建 Windows 计划任务 {tn}（登录时自动启动）。\n"
+            f"包装脚本(.cmd，@echo off + pythonw + start /b，仅登录时一闪而过)： {wrapper}\n"
+            f"日志： {logs_dir(settings)}\\gateway-{gw.name}.log"
+        )
         if start:
             self.start(settings, gw.name)
             msg += "\n已立即启动。"
@@ -394,6 +515,10 @@ class WindowsTaskManager(ServiceManager):
         wrapper = self._wrapper_path(settings, name)
         if wrapper.exists():
             wrapper.unlink()
+        # Clean up any VBScript launcher left by an older version.
+        legacy = wrapper.with_suffix(".vbs")
+        if legacy.exists():
+            legacy.unlink()
         return res.stdout.strip() or res.stderr.strip() or f"已删除计划任务 {self._task_name(name)}"
 
     def start(self, settings: Settings, name: str) -> str:
@@ -416,6 +541,56 @@ class WindowsTaskManager(ServiceManager):
             if line.lower().startswith("status:"):
                 return line.split(":", 1)[1].strip() or "unknown"
         return "installed"
+
+    def stats(self, settings: Settings, name: str) -> dict:
+        st = _empty_stats()
+        # Locate the (pythonw/python) process actually serving this gateway by
+        # matching its command line, then sum its WorkingSetSize (bytes).
+        needle = f"gateway run {name}"
+        script = (
+            "Get-CimInstance Win32_Process -Filter "
+            "\"Name='pythonw.exe' or Name='python.exe'\" | "
+            f"Where-Object {{ $_.CommandLine -like '*{needle}*' }} | "
+            "ForEach-Object {{ \"$($_.ProcessId) $($_.WorkingSetSize)\" }}"
+        )
+        res = _run(["powershell", "-NoProfile", "-Command", script], shell=True)
+        total = 0
+        for line in res.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                if st["pid"] is None:
+                    st["pid"] = int(parts[0])
+                total += int(parts[1])
+        if st["pid"] is not None:
+            st["running"] = True
+            st["rss"] = total
+            st["source"] = "WorkingSetSize"
+        return st
+
+
+def gather_stats(settings: Settings, name: str, with_cpu: bool = False) -> dict:
+    """Normalized live stats for a gateway, enriched with psutil when available.
+
+    Native managers provide running/pid/rss; if ``psutil`` is installed we add
+    thread count (and CPU%% on demand) and backfill rss when the native probe
+    couldn't read it.
+    """
+    st = get_manager().stats(settings, name)
+    pid = st.get("pid")
+    if pid:
+        try:
+            import psutil  # optional dependency
+
+            proc = psutil.Process(pid)
+            if st.get("rss") is None:
+                st["rss"] = proc.memory_info().rss
+                st["source"] = "psutil rss"
+            st["threads"] = proc.num_threads()
+            if with_cpu:
+                st["cpu_percent"] = proc.cpu_percent(interval=0.3)
+        except Exception:
+            pass
+    return st
 
 
 def get_manager() -> ServiceManager:
