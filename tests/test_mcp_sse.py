@@ -1,5 +1,4 @@
-"""Tests for the HTTP+SSE MCP client transport and dispatch auto-registration.
-"""
+"""Tests for the HTTP+SSE MCP client transport."""
 
 from __future__ import annotations
 
@@ -16,7 +15,6 @@ from ssr.integrations.mcp_client import (
     MCPSSEServer,
     MCPServer,
 )
-from ssr.agent.core import _load_mcp_specs
 
 
 class SSETestServer(BaseHTTPRequestHandler):
@@ -173,51 +171,3 @@ def test_from_config_sse_parsing(settings):
     stdio = mgr._servers["my_stdio_server"]
     assert isinstance(stdio, MCPServer)
     assert stdio.command == "python"
-
-
-def test_from_settings_dispatch_auto_registration(settings):
-    # Write remote.json
-    remote_cfg = {
-        "endpoint": "http://127.0.0.1:8787",
-        "token": "api-token-123",
-        "node_name": "test-node",
-    }
-    (settings.home / "remote.json").write_text(json.dumps(remote_cfg), "utf-8")
-    
-    # 1. Loading with settings should auto-register "dispatch" SSE MCP server
-    mgr = MCPManager.from_settings(settings)
-    assert "dispatch" in mgr._servers
-    dispatch_srv = mgr._servers["dispatch"]
-    assert isinstance(dispatch_srv, MCPSSEServer)
-    assert dispatch_srv.url == "http://127.0.0.1:8787/mcp"
-    assert dispatch_srv.query_params == {"key": "api-token-123"}
-    
-    # 2. If dispatch is already defined in mcp.json, user override wins
-    mcp_cfg = {
-        "mcpServers": {
-            "dispatch": {
-                "url": "http://custom-dispatch.com/mcp",
-                "query_params": {"key": "custom-token"},
-            }
-        }
-    }
-    (settings.home / "mcp.json").write_text(json.dumps(mcp_cfg), "utf-8")
-    
-    mgr2 = MCPManager.from_settings(settings)
-    assert "dispatch" in mgr2._servers
-    dispatch_srv2 = mgr2._servers["dispatch"]
-    assert dispatch_srv2.url == "http://custom-dispatch.com/mcp"
-    assert dispatch_srv2.query_params == {"key": "custom-token"}
-
-
-def test_agent_core_load_mcp_specs_fallback(settings):
-    # Write remote.json
-    remote_cfg = {
-        "endpoint": "http://127.0.0.1:8787",
-        "token": "api-token-123",
-        "node_name": "test-node",
-    }
-    (settings.home / "remote.json").write_text(json.dumps(remote_cfg), "utf-8")
-    
-    specs = _load_mcp_specs(settings)
-    assert any(s["name"] == "mcp:dispatch" for s in specs)

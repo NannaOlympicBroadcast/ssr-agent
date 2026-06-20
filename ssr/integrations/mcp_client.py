@@ -638,39 +638,6 @@ class MCPManager:
                 else:
                     _LOGGER.warning("plugin mcp server '%s' has neither 'command' nor 'url'; skipping", name)
 
-        # 3. Load remote dispatch MCP if configured
-        home_path = None
-        if hasattr(settings, "home") and settings.home:
-            home_path = Path(settings.home)
-        else:
-            try:
-                from ..config import ssr_home
-                home_path = ssr_home()
-            except Exception:
-                pass
-        
-        if home_path:
-            remote_json_path = home_path / "remote.json"
-            if remote_json_path.exists():
-                try:
-                    remote_cfg = json.loads(remote_json_path.read_text("utf-8"))
-                    endpoint = remote_cfg.get("endpoint")
-                    token = remote_cfg.get("token")
-                    if endpoint and token:
-                        # Ensure we don't overwrite user-defined "dispatch" in mcp.json
-                        if not any(s.name == "dispatch" for s in servers):
-                            url = f"{endpoint.rstrip('/')}/mcp"
-                            servers.append(
-                                MCPSSEServer(
-                                    name="dispatch",
-                                    url=url,
-                                    query_params={"key": token},
-                                    timeout=timeout,
-                                )
-                            )
-                except Exception as e:
-                    _LOGGER.warning("failed to load remote.json config: %s", e)
-                
         return cls(servers)
 
     def start_all(self) -> list[MCPTool]:

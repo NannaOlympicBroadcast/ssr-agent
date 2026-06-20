@@ -6,12 +6,9 @@ title, working directory); every later line is a ``turn`` (user/assistant). This
 append-only design is process- and thread-safe without locks: writers only ever
 append, and listings are rebuilt by scanning the directory.
 
-The store powers two things:
-
-* normal ``ssr`` usage — the REPL / one-shot / dispatched agent runs all record
-  their turns, so a machine accumulates a browsable history;
-* the dispatch server's web chat, which starts/continues sessions on a node and
-  lists/reads a node's past sessions.
+The store powers normal ``ssr`` usage — the REPL / one-shot / channel agent
+runs all record their turns, so a machine accumulates a browsable history
+(listed and read via ``/sessions``).
 """
 
 from __future__ import annotations
