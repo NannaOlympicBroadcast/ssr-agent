@@ -46,6 +46,10 @@ ssr
 6. **Built-in skills** installed to `~/.ssr/skills`:
    [larksuite](https://github.com/larksuite/cli) and
    [agent-browser](https://github.com/vercel-labs/agent-browser).
+7. **Gateway & deployment** — `ssr gateway` installs a channel-bound instance as
+   a cross-platform **system service** (systemd / launchd / Windows scheduled
+   task) for always-on messaging channels, and a `Dockerfile` /
+   `docker-compose.yml` provide a containerised deployment.
 
 ## Install
 
@@ -86,6 +90,12 @@ ssr models config        # interactively configure LLM models (Gemini, Anthropic
 # OpenAI-compatible API server
 ssr serve --port 8000    # start a local OpenAI-compatible HTTP server
 
+# Gateway: install a channel-bound instance as a system service (Win/macOS/Linux)
+ssr gateway install voicebox --channel xiaomi   # create + start a background service
+ssr gateway status                              # show all gateways and their state
+ssr gateway stop voicebox                       # stop / start / restart
+ssr gateway uninstall voicebox                  # remove the service
+
 # Remote control (connect to a dispatch server as a node)
 ssr rc                   # first run prompts for endpoint + token, then connects
 ssr rc status            # show the saved remote-control config
@@ -121,6 +131,66 @@ curl http://127.0.0.1:8000/v1/chat/completions \
     "stream": false
   }'
 ```
+
+### Gateway — channel as a system service (`ssr gateway`)
+
+A **gateway** turns a channel-bound SSR instance into a long-running background
+**system service** that survives logout/reboot and restarts on failure. The same
+command works on all three platforms, using each one's native service manager:
+
+| Platform | Backend | Where it lives |
+| --- | --- | --- |
+| Linux | systemd **user** unit (`systemctl --user`) | `~/.config/systemd/user/ssr-gateway-<name>.service` |
+| macOS | launchd LaunchAgent (`launchctl`) | `~/Library/LaunchAgents/com.ssr.gateway.<name>.plist` |
+| Windows | Scheduled Task at logon (`schtasks`) | task `ssr-gateway-<name>` + `~/.ssr/gateways/<name>.cmd` |
+
+```bash
+# Configure the channel once, then install it as a service:
+ssr channel config xiaomi
+ssr gateway install voicebox --channel xiaomi   # or feishu | wechat | all
+ssr gateway install voicebox --channel xiaomi --cwd /srv/app --no-start
+
+ssr gateway list                  # show configured gateways
+ssr gateway status [name]         # show service state (active / running / ...)
+ssr gateway start|stop|restart name
+ssr gateway uninstall name        # stop, remove the unit, drop the record
+```
+
+Gateway definitions are stored in `~/.ssr/gateways.json`; the installed service
+simply runs `ssr gateway run <name>`, which loads the record and serves its
+channel. The service runs `python -m ssr` from the **same interpreter** you
+installed with, and pins `SSR_HOME` so it finds your config and tokens.
+
+Notes:
+- **Linux:** user services stop when you log out unless lingering is enabled —
+  run `loginctl enable-linger $USER` for always-on. Logs: `journalctl --user -u ssr-gateway-<name> -f`.
+- **macOS/Windows:** stdout/stderr are written to `~/.ssr/logs/gateway-<name>.log`.
+- If no native manager is available (e.g. a minimal container), the gateway is
+  still saved and run-instructions are printed — use Docker or pm2 instead.
+
+### Docker deployment
+
+The repo ships a `Dockerfile`, `docker-compose.yml` and `.dockerignore` for a
+containerised deployment. All mutable state (config, tokens, sessions, indexes)
+lives under `SSR_HOME=/data/.ssr`, mounted as the `ssr-data` volume so it
+persists across container recreation.
+
+```bash
+cp .env.example .env        # fill in GEMINI_API_KEY / TAVILY_API_KEY
+
+# OpenAI-compatible API server (default service) on :8000
+docker compose up -d ssr
+
+# Or run a messaging channel instead:
+docker compose run --rm channel channel config xiaomi   # one-time interactive setup
+docker compose --profile channel up -d channel
+```
+
+The image entrypoint scaffolds `~/.ssr` (idempotent `ssr init`) and then execs
+`ssr <command>`. Override `command:` in compose (or `docker run … ssr <args>`)
+to serve a different channel (`channel on feishu|wechat|all`) or a gateway.
+Build with `--build-arg INSTALL_NODE=true` to also bundle Node.js for the
+chrome-devtools / miot MCP plugins.
 
 ### Remote control (`ssr rc`)
 
