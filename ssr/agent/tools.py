@@ -20,6 +20,7 @@ from .memory import MemoryStore
 
 _MAX_OUTPUT = 12_000
 _MAX_READ = 60_000
+_MAX_FILE_SEND = 16 * 1024 * 1024  # cap a single file transfer at ~16 MB (ws max_size)
 
 
 def decode_output(data: bytes | None) -> str:
@@ -66,6 +67,30 @@ class ToolKit:
         self.terminal = AsyncTerminal()
         self.permission_manager = PermissionManager(settings)
         self.approval_handler = TUIApprovalHandler()
+
+    # -------------------------------------------------------------- approvals
+    def _approval_context(self) -> dict:
+        """Context passed to the approval handler (IM/RC routing target)."""
+        agent = getattr(self, "agent_instance", None)
+        ctx = getattr(agent, "active_im_context", None) if agent is not None else None
+        if ctx:
+            return {"channel": ctx[0], "target": ctx[1]}
+        return {}
+
+    def _denied_message(self) -> str:
+        """Build the tool result for a denied command, including any user reason.
+
+        When the user supplies a reason on denial we hand it back to the model as
+        guidance so it can change course rather than blindly retrying the command.
+        """
+        reason = getattr(self.approval_handler, "denial_reason", "") or ""
+        if reason.strip():
+            return (
+                "Command execution DENIED by the user.\n"
+                f"User's reason / instruction: {reason.strip()}\n"
+                "Do not retry the same command. Follow the user's reason and adapt your approach."
+            )
+        return "ERROR: Command execution denied by user."
 
     # ------------------------------------------------------------------ paths
     def _resolve(self, path: str) -> Path:
@@ -118,26 +143,30 @@ class ToolKit:
             entries.append(("📁 " if e.is_dir() else "📄 ") + e.name)
         return "\n".join(entries) or "(empty)"
 
-    def run_command(self, command: str, timeout: int = 120) -> str:
-        """Run a shell command in the project directory and return stdout/stderr.
+    def run_command(self, command: str, timeout: int = 120, cwd: str = "") -> str:
+        """Run a shell command and return stdout/stderr.
 
         Args:
             command: The shell command line to execute.
             timeout: Maximum seconds to wait before aborting.
+            cwd: Optional working directory. Defaults to the project directory,
+                but may be any absolute or relative path so commands are not
+                restricted to the default directory (useful in channel mode).
         """
         res = self.permission_manager.check_permission(command)
         if res == PermissionResult.NEEDS_APPROVAL:
-            decision = self.approval_handler.request_approval(command)
+            decision = self.approval_handler.request_approval(command, self._approval_context())
             if decision == ApprovalDecision.ALWAYS_ALLOW:
                 self.permission_manager.add_always_allow(command)
             elif decision == ApprovalDecision.DENY:
-                return "ERROR: Command execution denied by user."
+                return self._denied_message()
 
+        workdir = self._resolve(cwd) if cwd else self.settings.project_dir
         try:
             proc = subprocess.run(
                 command,
                 shell=True,
-                cwd=str(self.settings.project_dir),
+                cwd=str(workdir),
                 capture_output=True,
                 timeout=timeout,
             )
@@ -158,11 +187,11 @@ class ToolKit:
         """
         res = self.permission_manager.check_permission(command)
         if res == PermissionResult.NEEDS_APPROVAL:
-            decision = self.approval_handler.request_approval(command)
+            decision = self.approval_handler.request_approval(command, self._approval_context())
             if decision == ApprovalDecision.ALWAYS_ALLOW:
                 self.permission_manager.add_always_allow(command)
             elif decision == ApprovalDecision.DENY:
-                return "ERROR: Command execution denied by user."
+                return self._denied_message()
 
         def on_finished(tid, code):
             agent = getattr(self, "agent_instance", None)
@@ -200,6 +229,60 @@ class ToolKit:
             terminal_id: The ID of the terminal.
         """
         return self.terminal.kill(terminal_id)
+
+    def send_file_to_user(self, path: str, caption: str = "") -> str:
+        """Send a local file to the user so they can download/receive it.
+
+        In a remote-control (rc) web session the file is streamed to the browser
+        for download. Use this to deliver generated artifacts (reports, images,
+        archives, build outputs) to the user.
+
+        Args:
+            path: Path to the local file, absolute or relative to the project dir.
+            caption: Optional short note shown alongside the file.
+        """
+        import base64
+        import mimetypes
+
+        p = self._resolve(path)
+        if not p.is_file():
+            return f"ERROR: no such file: {p}"
+        data = p.read_bytes()
+        if len(data) > _MAX_FILE_SEND:
+            return f"ERROR: file too large to send ({len(data)} bytes; limit {_MAX_FILE_SEND})."
+        agent = getattr(self, "agent_instance", None)
+        ctx = getattr(agent, "active_im_context", None) if agent is not None else None
+        mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+
+        if agent is not None and ctx and ctx[0] == "rc":
+            agent._emit(
+                "file",
+                tag="ssr",
+                name=p.name,
+                size=len(data),
+                mime=mime,
+                caption=caption,
+                data_b64=base64.b64encode(data).decode("ascii"),
+            )
+            return f"Sent file '{p.name}' ({len(data)} bytes) to the user."
+
+        # Other channels with native file support (feishu/wechat).
+        if ctx and ctx[0] in ("feishu", "wechat"):
+            try:
+                import ssr.channels  # ensure channels are registered
+                from ssr.channels.registry import registry
+
+                channel = registry.get(ctx[0])
+                if channel is not None:
+                    channel.send_file(ctx[1], str(p), mime)
+                    return f"Sent file '{p.name}' to {ctx[0]}."
+            except Exception as e:
+                return f"ERROR: could not send file via {ctx[0]}: {e}"
+
+        return (
+            f"File is ready at {p} ({len(data)} bytes). "
+            "Direct file delivery is only available in remote-control / IM sessions."
+        )
 
     def push_notification(self, channel: str, target: str, message: str) -> str:
         """Send a message or notification to a specific channel (e.g. feishu, wechat) and recipient.
@@ -334,6 +417,7 @@ class ToolKit:
             self.spawn_sub_agent,
             self.reindex_context,
             self.push_notification,
+            self.send_file_to_user,
         ]
 
     def specs(self) -> list[dict]:

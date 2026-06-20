@@ -9,6 +9,7 @@ end. Both paths share the same :class:`ToolKit`.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from ..config import Settings
@@ -42,7 +43,7 @@ class SSRAgent:
         self.models_config = ModelsConfig(settings)
         # Spawn the MCP servers declared in ~/.ssr/mcp.json and enumerate their
         # tools. Failures are isolated per-server (the agent still runs).
-        self.mcp_manager = _start_mcp_manager(settings.mcp_config)
+        self.mcp_manager = _start_mcp_manager(settings)
         self.mcp_tools = self.mcp_manager.tools
         # Per-tool specs seed the 'tools' context category (so MCP tools are
         # retrievable); fall back to server-level specs if nothing started.
@@ -68,6 +69,9 @@ class SSRAgent:
         self._mcp_tools_param = None  # cached genai Tool for the MCP declarations
         self.terminal_contexts = {}
         self.active_im_context = None
+        # Interruption + concurrent side-question (/stop, /btw) coordination.
+        self._stop_event = threading.Event()
+        self._busy = threading.Event()
 
     def close(self) -> None:
         """Tear down all managed MCP server subprocesses."""
@@ -142,6 +146,20 @@ class SSRAgent:
             parts.append("\n# Loaded configurations (claude.md / soul.md / profile.md)")
             for item in configs:
                 parts.append(f"\n## {item.title}\n{item.text[:6000]}")
+
+        # REFS.md — catalogue of reference materials (name / location / content).
+        refs = [
+            item for item in self.retriever.pool().by_category("refs")
+            if item.metadata.get("kind") == "refs"
+        ]
+        if refs:
+            parts.append(
+                "\n# Reference materials (REFS.md)\n"
+                "These reference materials are available; use `search_context category=refs`"
+                " to look one up, then read its location (URL / path / inline text)."
+            )
+            for item in refs:
+                parts.append(f"\n## {item.title}\n{item.text[:4000]}")
         return "\n".join(parts)
 
     def _retrieved_context_text(self, user_message: str) -> str:
@@ -159,6 +177,73 @@ class SSRAgent:
         """Retrieve top context for the request and prepend it to the message."""
         ctx = self._retrieved_context_text(user_message)
         return f"{ctx}\n\n{user_message}" if ctx else user_message
+
+    # ------------------------------------------------- interruption / side Q&A
+    def request_stop(self) -> bool:
+        """Ask the running main turn to stop at the next tool-call boundary.
+
+        Returns True if a turn was actually running. The provider loop checks
+        :meth:`should_stop` between iterations and aborts cooperatively, so any
+        in-flight tool call finishes cleanly (no corrupted terminal/files).
+        """
+        if self._busy.is_set():
+            self._stop_event.set()
+            return True
+        return False
+
+    def should_stop(self, tag: str = "ssr") -> bool:
+        """Whether the current main turn has been asked to stop (via /stop)."""
+        return tag == "ssr" and self._stop_event.is_set()
+
+    def is_busy(self) -> bool:
+        return self._busy.is_set()
+
+    def answer_side_question(self, question: str) -> str:
+        """Answer a question *alongside* a running main turn (the ``/btw`` flow).
+
+        The side answer runs on an isolated :class:`ToolKit` and its own contents
+        list, so its tool calls never race with the main agent's mutable state
+        (terminals, plan, history). It is given the main conversation as read-only
+        context, and is never interrupted by ``/stop``.
+        """
+        from google.genai import types
+
+        try:
+            side_toolkit = ToolKit(
+                self.settings, self.retriever, self.memory, sub_agent_runner=None
+            )
+            side_toolkit.agent_instance = self
+            history_text = self._history_summary()
+            context = (
+                "You are answering a side question the user asked WHILE the main "
+                "task keeps running in the background. Answer concisely; prefer "
+                "read-only tools and avoid changing files the main task may be using.\n\n"
+                f"Main conversation so far:\n{history_text}"
+            )
+            prompt = f"{context}\n\nSide question: {question}"
+            contents = [types.Content(role="user", parts=[types.Part(text=prompt)])]
+            self._emit("btw", tag="btw", text=question)
+            return self._complete(
+                contents,
+                "You are the SSR agent handling a concurrent side question.",
+                side_toolkit,
+                tag="btw",
+                max_iters=10,
+            )
+        except Exception as e:
+            return f"[btw error] {e}"
+
+    def _history_summary(self, max_chars: int = 4000) -> str:
+        lines: list[str] = []
+        for content in self._history[-8:]:
+            role = getattr(content, "role", "?")
+            text = " ".join(
+                getattr(p, "text", "") or "" for p in (getattr(content, "parts", None) or [])
+            ).strip()
+            if text:
+                lines.append(f"[{role}] {text}")
+        blob = "\n".join(lines)
+        return blob[-max_chars:]
 
     # -------------------------------------------------------------------- run
     def run(self, user_message: str) -> str:
@@ -232,12 +317,21 @@ class SSRAgent:
             gp.append(types.Part(text=text_blob))
 
         self._history.append(types.Content(role="user", parts=gp))
+        # Mark this as the running main turn so /stop and /btw can coordinate.
+        nested = self._busy.is_set()
+        if not nested:
+            self._stop_event.clear()
+            self._busy.set()
         try:
             reply = self._complete(
                 self._history, self.system_instruction(), self.toolkit, max_iters=24, tag="ssr"
             )
         except Exception as e:
             reply = f"[agent error] {e}"
+        finally:
+            if not nested:
+                self._busy.clear()
+                self._stop_event.clear()
         self._history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
         self.memory.log_turn("assistant", reply)
         self._record_turn("assistant", reply)
@@ -419,14 +513,16 @@ class SSRAgent:
         )
 
 
-def _start_mcp_manager(mcp_path: Path) -> MCPManager:
-    """Build an :class:`MCPManager` from the config and start its servers.
+def _start_mcp_manager(settings: Settings) -> MCPManager:
+    """Build an :class:`MCPManager` from ``mcp.json`` + plugins and start servers.
 
     Never raises: if anything goes wrong an empty (no-op) manager is returned so
     the agent keeps working without MCP.
     """
     try:
-        manager = MCPManager.from_config(mcp_path)
+        from ..plugins import merged_mcp_servers
+
+        manager = MCPManager.from_server_configs(merged_mcp_servers(settings))
         manager.start_all()
         return manager
     except Exception:  # pragma: no cover - defensive

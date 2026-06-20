@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..config import CONFIG_DOC_NAMES, Settings
+from ..config import CONFIG_DOC_NAMES, REFS_DOC_NAMES, Settings
 from ..skills.manager import discover_skills
 from .pool import ContextCategory, ContextItem, ContextPool
 
@@ -42,6 +42,87 @@ def load_configurations(settings: Settings) -> list[ContextItem]:
                     metadata={"scope": scope, "name": name.lower()},
                 )
             )
+    return items
+
+
+def parse_refs_table(text: str) -> list[dict]:
+    """Parse a REFS.md markdown table into a list of reference records.
+
+    The table is expected to have the columns ``名称/Name``, ``位置/Location``
+    and ``内容/Content`` (in any order, header names are matched loosely). Rows
+    outside the table and the header/separator lines are ignored.
+    """
+    rows: list[dict] = []
+    header: list[str] | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        # Skip the GFM separator row ( |---|---| ).
+        if all(set(c) <= {"-", ":", " "} and c for c in cells):
+            continue
+        if header is None:
+            header = [c.lower() for c in cells]
+            continue
+        rec: dict = {}
+        for i, c in enumerate(cells):
+            key = header[i] if i < len(header) else f"col{i}"
+            rec[key] = c
+        # Normalise to name/location/content regardless of the header language.
+        def pick(*keys: str) -> str:
+            for h_i, h in enumerate(header or []):
+                if any(k in h for k in keys) and h_i < len(cells):
+                    return cells[h_i]
+            return ""
+        name = pick("名称", "name", "资料")
+        if not name:
+            continue
+        rec["name"] = name
+        rec["location"] = pick("位置", "location", "位置/path", "url", "path")
+        rec["content"] = pick("内容", "content", "描述", "description")
+        rows.append(rec)
+    return rows
+
+
+def load_refs(settings: Settings) -> list[ContextItem]:
+    """Load REFS.md (global + project): a catalogue of reference materials.
+
+    The whole file is exposed as one retrievable item per scope, and each table
+    row additionally becomes its own item so an individual reference can be
+    surfaced by name/location/content.
+    """
+    items: list[ContextItem] = []
+    seen: set[Path] = set()
+    for base in (settings.home, settings.project_dir):
+        for name in REFS_DOC_NAMES:
+            path = base / name
+            if not path.exists() or path in seen:
+                continue
+            seen.add(path)
+            text = _read_text(path)
+            if not text.strip():
+                continue
+            scope = "global" if base == settings.home else "project"
+            items.append(
+                ContextItem(
+                    category=ContextCategory.REFS,
+                    title=f"REFS.md ({scope})",
+                    text=text,
+                    source=str(path),
+                    metadata={"scope": scope, "kind": "refs"},
+                )
+            )
+            for rec in parse_refs_table(text):
+                items.append(
+                    ContextItem(
+                        category=ContextCategory.REFS,
+                        title=f"ref: {rec['name']}",
+                        text=f"{rec['name']} — 位置: {rec.get('location', '')}\n{rec.get('content', '')}",
+                        source=str(path),
+                        metadata={"scope": scope, "kind": "ref", **rec},
+                    )
+                )
     return items
 
 
@@ -130,4 +211,5 @@ def build_pool(settings: Settings, tool_specs: list[dict] | None = None) -> Cont
     pool.extend(load_configurations(settings))
     pool.extend(load_skills(settings))
     pool.extend(load_memory(settings))
+    pool.extend(load_refs(settings))
     return pool
