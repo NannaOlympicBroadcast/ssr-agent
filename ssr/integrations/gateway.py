@@ -95,6 +95,27 @@ def service_id(name: str) -> str:
 
 
 # ----------------------------------------------------------------- run gateway
+def _redirect_headless_output(settings: Settings, name: str) -> None:
+    """Point stdout/stderr at the gateway log when launched without a console.
+
+    On Windows the service runs under ``pythonw.exe`` (windowless) via a hidden
+    VBScript launcher, so ``sys.stdout`` / ``sys.stderr`` are ``None``. Channel
+    logging writes to ``sys.stdout``; redirect both to the log file so nothing is
+    lost and no console window is needed.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        log = logs_dir(settings) / f"gateway-{name}.log"
+        stream = open(log, "a", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
 def run_gateway(settings: Settings, name: str) -> int:
     """Foreground entrypoint executed by the system service: serve the channel."""
     import threading
@@ -105,6 +126,9 @@ def run_gateway(settings: Settings, name: str) -> int:
         raise SystemExit(
             f"未找到网关 '{name}'。请先安装： ssr gateway install {name} --channel <feishu|wechat|xiaomi|all>"
         )
+
+    # When launched headless (pythonw, no console) capture output to the log.
+    _redirect_headless_output(settings, name)
 
     import ssr.channels  # noqa: F401 — trigger channel registration
     from ssr.channels.registry import registry
@@ -356,34 +380,55 @@ class WindowsTaskManager(ServiceManager):
     def _task_name(self, name: str) -> str:
         return service_id(name)
 
-    def _wrapper_path(self, settings: Settings, name: str) -> Path:
+    def _interpreter(self) -> str:
+        """Prefer ``pythonw.exe`` (no console window) over ``python.exe``."""
+        exe = Path(sys.executable)
+        pyw = exe.with_name("pythonw.exe")
+        return str(pyw) if pyw.exists() else sys.executable
+
+    def _launcher_path(self, settings: Settings, name: str) -> Path:
         d = settings.home / "gateways"
         d.mkdir(parents=True, exist_ok=True)
-        return d / f"{name}.cmd"
+        return d / f"{name}.vbs"
 
-    def _write_wrapper(self, settings: Settings, gw: Gateway) -> Path:
-        path = self._wrapper_path(settings, gw.name)
-        log = logs_dir(settings) / f"gateway-{gw.name}.log"
-        lines = ["@echo off", f'set "SSR_HOME={settings.home}"']
+    def _write_launcher(self, settings: Settings, gw: Gateway) -> Path:
+        """Write a VBScript that starts the gateway **hidden** (no terminal).
+
+        ``WScript.Shell.Run(cmd, 0, True)`` launches with window style 0
+        (hidden); combined with ``pythonw.exe`` no console window ever appears.
+        SSR_HOME / extra env / cwd are set on the process so the headless run
+        finds the right home, and output is captured by the run command itself.
+        """
+        path = self._launcher_path(settings, gw.name)
+        exe = self._interpreter()
+        # VBS string literals escape a literal " as "" — keep the exe path quoted.
+        run_cmd = '""' + exe + '"" -m ssr gateway run ' + gw.name
+        lines = [
+            'Set sh = CreateObject("WScript.Shell")',
+            f'sh.Environment("PROCESS")("SSR_HOME") = "{settings.home}"',
+        ]
         for k, v in (gw.env or {}).items():
-            lines.append(f'set "{k}={v}"')
+            lines.append(f'sh.Environment("PROCESS")("{k}") = "{v}"')
         if gw.cwd:
-            lines.append(f'cd /d "{gw.cwd}"')
-        exec_args = " ".join(f'"{a}"' if " " in a else a for a in _exec_args(gw.name))
-        lines.append(f'{exec_args} >> "{log}" 2>&1')
+            lines.append(f'sh.CurrentDirectory = "{gw.cwd}"')
+        lines.append(f'sh.Run "{run_cmd}", 0, True')
         path.write_text("\r\n".join(lines) + "\r\n", "utf-8")
         return path
 
     def install(self, settings: Settings, gw: Gateway, start: bool = True) -> str:
-        wrapper = self._write_wrapper(settings, gw)
+        launcher = self._write_launcher(settings, gw)
         tn = self._task_name(gw.name)
+        # Run the hidden VBScript via wscript.exe (windowless host).
         res = _run([
-            "schtasks", "/Create", "/TN", tn, "/TR", str(wrapper),
+            "schtasks", "/Create", "/TN", tn, "/TR", f'wscript.exe "{launcher}"',
             "/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
         ], shell=True)
         if res.returncode != 0:
             return f"[!] 创建计划任务失败：{res.stderr.strip() or res.stdout.strip()}"
-        msg = f"已创建 Windows 计划任务 {tn}（登录时自动启动）。\n包装脚本： {wrapper}"
+        msg = (
+            f"已创建 Windows 计划任务 {tn}（登录时自动启动，无终端窗口）。\n"
+            f"启动脚本： {launcher}\n日志： {logs_dir(settings)}\\gateway-{gw.name}.log"
+        )
         if start:
             self.start(settings, gw.name)
             msg += "\n已立即启动。"
@@ -391,9 +436,13 @@ class WindowsTaskManager(ServiceManager):
 
     def uninstall(self, settings: Settings, name: str) -> str:
         res = _run(["schtasks", "/Delete", "/TN", self._task_name(name), "/F"], shell=True)
-        wrapper = self._wrapper_path(settings, name)
-        if wrapper.exists():
-            wrapper.unlink()
+        launcher = self._launcher_path(settings, name)
+        if launcher.exists():
+            launcher.unlink()
+        # Clean up any wrapper left by an older version.
+        legacy = launcher.with_suffix(".cmd")
+        if legacy.exists():
+            legacy.unlink()
         return res.stdout.strip() or res.stderr.strip() or f"已删除计划任务 {self._task_name(name)}"
 
     def start(self, settings: Settings, name: str) -> str:

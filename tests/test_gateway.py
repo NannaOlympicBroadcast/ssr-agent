@@ -74,16 +74,46 @@ def test_launchd_plist_is_valid_xml(tmp_path):
     assert parsed["EnvironmentVariables"]["SSR_HOME"] == str(settings.home)
 
 
-def test_windows_wrapper_script(tmp_path):
+def test_windows_launcher_is_hidden_vbs(tmp_path):
     settings = _settings(tmp_path)
     record = gw.Gateway(name="box", channel="wechat", cwd="C:/work", env={"K": "V"})
-    path = gw.WindowsTaskManager()._write_wrapper(settings, record)
+    path = gw.WindowsTaskManager()._write_launcher(settings, record)
     body = path.read_text("utf-8")
-    assert "@echo off" in body
-    assert "set \"SSR_HOME=" in body
-    assert "set \"K=V\"" in body
-    assert "cd /d \"C:/work\"" in body
-    assert "gateway run box" in body
+    assert path.suffix == ".vbs"
+    # Window style 0 = hidden, so no terminal window appears.
+    assert ", 0, True" in body
+    assert 'WScript.Shell' in body
+    assert 'sh.Environment("PROCESS")("SSR_HOME")' in body
+    assert 'sh.Environment("PROCESS")("K") = "V"' in body
+    assert 'sh.CurrentDirectory = "C:/work"' in body
+    assert "-m ssr gateway run box" in body
+
+
+def test_windows_interpreter_prefers_pythonw(tmp_path, monkeypatch):
+    mgr = gw.WindowsTaskManager()
+    # When pythonw.exe exists next to the interpreter, it is preferred.
+    monkeypatch.setattr(gw.Path, "exists", lambda self: str(self).endswith("pythonw.exe"))
+    assert mgr._interpreter().endswith("pythonw.exe")
+
+
+def test_redirect_headless_output_when_no_console(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    real_out, real_err = sys.stdout, sys.stderr
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    try:
+        gw._redirect_headless_output(settings, "box")
+        assert sys.stdout is not None and sys.stderr is not None
+        sys.stdout.write("hello\n")
+        sys.stdout.flush()
+    finally:
+        try:
+            sys.stdout.close()
+        except Exception:
+            pass
+        sys.stdout, sys.stderr = real_out, real_err
+    log = (settings.home / "logs" / "gateway-box.log").read_text("utf-8")
+    assert "hello" in log
 
 
 def test_null_manager_degrades_gracefully(tmp_path):

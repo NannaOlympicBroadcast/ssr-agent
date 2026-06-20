@@ -142,7 +142,7 @@ command works on all three platforms, using each one's native service manager:
 | --- | --- | --- |
 | Linux | systemd **user** unit (`systemctl --user`) | `~/.config/systemd/user/ssr-gateway-<name>.service` |
 | macOS | launchd LaunchAgent (`launchctl`) | `~/Library/LaunchAgents/com.ssr.gateway.<name>.plist` |
-| Windows | Scheduled Task at logon (`schtasks`) | task `ssr-gateway-<name>` + `~/.ssr/gateways/<name>.cmd` |
+| Windows | Scheduled Task at logon (`schtasks`) | task `ssr-gateway-<name>` + hidden `~/.ssr/gateways/<name>.vbs` |
 
 ```bash
 # Configure the channel once, then install it as a service:
@@ -164,7 +164,9 @@ installed with, and pins `SSR_HOME` so it finds your config and tokens.
 Notes:
 - **Linux:** user services stop when you log out unless lingering is enabled —
   run `loginctl enable-linger $USER` for always-on. Logs: `journalctl --user -u ssr-gateway-<name> -f`.
-- **macOS/Windows:** stdout/stderr are written to `~/.ssr/logs/gateway-<name>.log`.
+- **Windows:** the task runs `pythonw.exe` via a hidden VBScript launcher, so
+  **no terminal window appears**; output goes to `~/.ssr/logs/gateway-<name>.log`.
+- **macOS:** stdout/stderr are written to `~/.ssr/logs/gateway-<name>.log`.
 - If no native manager is available (e.g. a minimal container), the gateway is
   still saved and run-instructions are printed — use Docker or pm2 instead.
 
