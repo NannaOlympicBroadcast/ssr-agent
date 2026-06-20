@@ -74,19 +74,22 @@ def test_launchd_plist_is_valid_xml(tmp_path):
     assert parsed["EnvironmentVariables"]["SSR_HOME"] == str(settings.home)
 
 
-def test_windows_launcher_is_hidden_vbs(tmp_path):
+def test_windows_wrapper_is_cmd_with_echo_off(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
     record = gw.Gateway(name="box", channel="wechat", cwd="C:/work", env={"K": "V"})
-    path = gw.WindowsTaskManager()._write_launcher(settings, record)
+    # Force a pythonw interpreter so the assertion is deterministic off-Windows.
+    monkeypatch.setattr(gw.WindowsTaskManager, "_interpreter",
+                        lambda self: r"C:\Py\pythonw.exe")
+    path = gw.WindowsTaskManager()._write_wrapper(settings, record)
     body = path.read_text("utf-8")
-    assert path.suffix == ".vbs"
-    # Window style 0 = hidden, so no terminal window appears.
-    assert ", 0, True" in body
-    assert 'WScript.Shell' in body
-    assert 'sh.Environment("PROCESS")("SSR_HOME")' in body
-    assert 'sh.Environment("PROCESS")("K") = "V"' in body
-    assert 'sh.CurrentDirectory = "C:/work"' in body
-    assert "-m ssr gateway run box" in body
+    assert path.suffix == ".cmd"
+    assert body.startswith("@echo off")
+    assert 'set "SSR_HOME=' in body
+    assert 'set "K=V"' in body
+    assert 'cd /d "C:/work"' in body
+    # start "" /b + pythonw → windowless; cmd exits so only a brief flash.
+    assert 'start "" /b "C:\\Py\\pythonw.exe" -m ssr gateway run box' in body
+    assert ">>" in body and "2>&1" in body
 
 
 def test_windows_interpreter_prefers_pythonw(tmp_path, monkeypatch):

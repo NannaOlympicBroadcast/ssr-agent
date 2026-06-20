@@ -464,48 +464,46 @@ class WindowsTaskManager(ServiceManager):
         pyw = exe.with_name("pythonw.exe")
         return str(pyw) if pyw.exists() else sys.executable
 
-    def _launcher_path(self, settings: Settings, name: str) -> Path:
+    def _wrapper_path(self, settings: Settings, name: str) -> Path:
         d = settings.home / "gateways"
         d.mkdir(parents=True, exist_ok=True)
-        return d / f"{name}.vbs"
+        return d / f"{name}.cmd"
 
-    def _write_launcher(self, settings: Settings, gw: Gateway) -> Path:
-        """Write a VBScript that starts the gateway **hidden** (no terminal).
+    def _write_wrapper(self, settings: Settings, gw: Gateway) -> Path:
+        """Write the ``.cmd`` the scheduled task runs.
 
-        ``WScript.Shell.Run(cmd, 0, True)`` launches with window style 0
-        (hidden); combined with ``pythonw.exe`` no console window ever appears.
-        SSR_HOME / extra env / cwd are set on the process so the headless run
-        finds the right home, and output is captured by the run command itself.
+        Starts with ``@echo off`` to keep the console clean, sets SSR_HOME /
+        extra env / cwd, then uses ``start "" /b`` to launch the **windowless**
+        ``pythonw.exe`` and let ``cmd`` exit immediately — so only a brief
+        console flash appears at logon instead of a persistent window. Output is
+        redirected to the gateway log (``run_gateway`` also redirects when
+        running under pythonw, which has no console).
         """
-        path = self._launcher_path(settings, gw.name)
+        path = self._wrapper_path(settings, gw.name)
         exe = self._interpreter()
-        # VBS string literals escape a literal " as "" — keep the exe path quoted.
-        run_cmd = '""' + exe + '"" -m ssr gateway run ' + gw.name
-        lines = [
-            'Set sh = CreateObject("WScript.Shell")',
-            f'sh.Environment("PROCESS")("SSR_HOME") = "{settings.home}"',
-        ]
+        log = logs_dir(settings) / f"gateway-{gw.name}.log"
+        lines = ["@echo off", f'set "SSR_HOME={settings.home}"']
         for k, v in (gw.env or {}).items():
-            lines.append(f'sh.Environment("PROCESS")("{k}") = "{v}"')
+            lines.append(f'set "{k}={v}"')
         if gw.cwd:
-            lines.append(f'sh.CurrentDirectory = "{gw.cwd}"')
-        lines.append(f'sh.Run "{run_cmd}", 0, True')
+            lines.append(f'cd /d "{gw.cwd}"')
+        lines.append(f'start "" /b "{exe}" -m ssr gateway run {gw.name} >> "{log}" 2>&1')
         path.write_text("\r\n".join(lines) + "\r\n", "utf-8")
         return path
 
     def install(self, settings: Settings, gw: Gateway, start: bool = True) -> str:
-        launcher = self._write_launcher(settings, gw)
+        wrapper = self._write_wrapper(settings, gw)
         tn = self._task_name(gw.name)
-        # Run the hidden VBScript via wscript.exe (windowless host).
         res = _run([
-            "schtasks", "/Create", "/TN", tn, "/TR", f'wscript.exe "{launcher}"',
+            "schtasks", "/Create", "/TN", tn, "/TR", f'cmd /c "{wrapper}"',
             "/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
         ], shell=True)
         if res.returncode != 0:
             return f"[!] 创建计划任务失败：{res.stderr.strip() or res.stdout.strip()}"
         msg = (
-            f"已创建 Windows 计划任务 {tn}（登录时自动启动，无终端窗口）。\n"
-            f"启动脚本： {launcher}\n日志： {logs_dir(settings)}\\gateway-{gw.name}.log"
+            f"已创建 Windows 计划任务 {tn}（登录时自动启动）。\n"
+            f"包装脚本(.cmd，@echo off + pythonw + start /b，仅登录时一闪而过)： {wrapper}\n"
+            f"日志： {logs_dir(settings)}\\gateway-{gw.name}.log"
         )
         if start:
             self.start(settings, gw.name)
@@ -514,11 +512,11 @@ class WindowsTaskManager(ServiceManager):
 
     def uninstall(self, settings: Settings, name: str) -> str:
         res = _run(["schtasks", "/Delete", "/TN", self._task_name(name), "/F"], shell=True)
-        launcher = self._launcher_path(settings, name)
-        if launcher.exists():
-            launcher.unlink()
-        # Clean up any wrapper left by an older version.
-        legacy = launcher.with_suffix(".cmd")
+        wrapper = self._wrapper_path(settings, name)
+        if wrapper.exists():
+            wrapper.unlink()
+        # Clean up any VBScript launcher left by an older version.
+        legacy = wrapper.with_suffix(".vbs")
         if legacy.exists():
             legacy.unlink()
         return res.stdout.strip() or res.stderr.strip() or f"已删除计划任务 {self._task_name(name)}"
