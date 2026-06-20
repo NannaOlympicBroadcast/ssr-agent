@@ -176,7 +176,9 @@ class XiaomiSpeaker:
             MiTokenStore(str(tok)),
         )
         self._mina = MiNAService(self._account)
-        logger.info("Mi account/MiNAService initialised; selecting speaker…")
+        logger.info("Mi account/MiNAService initialised; logging in…")
+        await self._login_or_diagnose()
+        logger.info("Mi login OK; selecting speaker…")
         self.device = await self._select_device()
         logger.info(
             "selected speaker: name=%r deviceID=%s hardware=%s did=%s",
@@ -190,6 +192,24 @@ class XiaomiSpeaker:
             except Exception:
                 pass
             self._session = None
+
+    async def _login_or_diagnose(self) -> None:
+        """Log in to the Mi passport, raising an *actionable* error on failure.
+
+        ``MiAccount.login`` swallows errors and just returns False, so we run it
+        and, on failure, replay the ``serviceLoginAuth2`` step ourselves to read
+        the real response — most importantly any security-verification URL the
+        account must visit before automated login will work.
+        """
+        ok = False
+        try:
+            ok = await self._account.login("micoapi")
+        except Exception:
+            logger.exception("MiAccount.login raised")
+        if ok:
+            return
+        reason = await _diagnose_login(self._account, self.cfg)
+        raise RuntimeError(reason + "\n\n" + _miot_cache_note())
 
     async def _select_device(self) -> SpeakerDevice:
         try:
@@ -271,6 +291,117 @@ class XiaomiSpeaker:
             except Exception:
                 logger.exception("  TTS chunk %d/%d failed; aborting remaining chunks", i + 1, len(chunks))
                 break
+
+
+def find_miot_cache() -> dict | None:
+    """Return the miot plugin's cached cloud OAuth info from ``~/.miot_cache``.
+
+    The bundled ``miot`` plugin logs in with an **OAuth2** flow and caches the
+    token under ``~/.miot_cache/cloud/`` (``oauth_info`` + ``uuid``). Returns the
+    parsed dict (with a ``_path`` key) if present, else None.
+    """
+    base = Path("~/.miot_cache/cloud").expanduser()
+    for name in ("oauth_info.dict", "oauth_info.json", "oauth_info"):
+        p = base / name
+        if not p.exists():
+            continue
+        try:
+            raw = p.read_bytes()
+            # storage may append a 32-byte sha256 integrity digest after the json
+            for end in (len(raw), len(raw) - 32):
+                if end <= 0:
+                    continue
+                try:
+                    data = json.loads(raw[:end].decode("utf-8"))
+                    if isinstance(data, dict):
+                        data["_path"] = str(p)
+                        return data
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+        except OSError:
+            continue
+    return None
+
+
+def _miot_cache_note() -> str:
+    """A note about whether the miot OAuth cache can help (it can't, for ASR)."""
+    info = find_miot_cache()
+    if info is None:
+        return (
+            "提示：未找到 miot 插件的登录缓存（~/.miot_cache/cloud）。"
+            "小爱对话频道使用的是小米账号 passport 登录（serviceToken），"
+            "与 miot 插件的 OAuth 登录是两套不同的凭据。"
+        )
+    return (
+        f"已检测到 miot 插件的 OAuth 登录缓存：{info.get('_path')} "
+        f"(access_token={'有' if info.get('access_token') else '无'})。\n"
+        "但它是【米家开放平台 OAuth2】凭据，只能用于设备控制，"
+        "无法用于小爱音箱对话所需的 MiNA/passport 接口（ASR/get_latest_ask 需要 serviceToken）。\n"
+        "因此请按上面的链接完成一次小米账号安全验证，让 passport 登录成功并缓存到 "
+        "~/.ssr/xiaomi-token.json 后即可正常对话。"
+    )
+
+
+async def _diagnose_login(account, cfg: XiaomiConfig) -> str:
+    """Replay the login to surface why it failed (verification / bad password)."""
+    import hashlib
+
+    generic = (
+        "小米登录失败。常见原因：账号或密码不正确、区域(region)不对、"
+        "或账号触发了安全验证。请检查 ~/.ssr/xiaomi.json 后重试。"
+    )
+    try:
+        from miservice.miaccount import get_random
+    except Exception:
+        get_random = None
+    try:
+        account.token = {"deviceId": (get_random(16).upper() if get_random else "0123456789ABCDEF")}
+        resp = await account._serviceLogin("serviceLogin?sid=micoapi&_json=true")
+        if resp.get("code") != 0:
+            data = {
+                "_json": "true",
+                "qs": resp.get("qs"),
+                "sid": resp.get("sid"),
+                "_sign": resp.get("_sign"),
+                "callback": resp.get("callback"),
+                "user": cfg.account,
+                "hash": hashlib.md5(cfg.password.encode()).hexdigest().upper(),
+            }
+            resp = await account._serviceLogin("serviceLoginAuth2", data)
+    except Exception as e:
+        logger.exception("login diagnosis failed")
+        return f"{generic}\n(诊断时再次出错：{e})"
+
+    code = resp.get("code")
+    desc = resp.get("desc") or resp.get("description") or ""
+    logger.error("login diagnosis: code=%s desc=%s keys=%s", code, desc, list(resp.keys()))
+
+    notif = resp.get("notificationUrl")
+    if notif:
+        if notif.startswith("/"):
+            notif = "https://account.xiaomi.com" + notif
+        return (
+            "小米账号需要【安全验证】才能登录（常见于服务器/新 IP 登录）。\n"
+            "请在浏览器打开下面的链接，用该小米账号完成验证（短信/设备确认）：\n"
+            f"    {notif}\n"
+            "完成后重新运行：ssr channel on xiaomi（验证一次后会缓存登录态）。"
+        )
+    if resp.get("captchaUrl"):
+        cap = resp["captchaUrl"]
+        if cap.startswith("/"):
+            cap = "https://account.xiaomi.com" + cap
+        return (
+            "小米登录需要图形验证码（captcha）。请先在浏览器登录一次小米账号完成验证：\n"
+            f"    {cap}\n然后重试 ssr channel on xiaomi。"
+        )
+    if code == 70016 or "password" in desc.lower():
+        return f"小米账号或密码不正确（code={code} {desc}）。请检查 ~/.ssr/xiaomi.json 的 account/password。"
+    if "userId" not in resp:
+        return (
+            f"小米登录未返回 userId（code={code} {desc}; keys={list(resp.keys())}）。"
+            "通常是需要安全验证或账号/密码不正确。"
+        )
+    return f"{generic}\n(code={code} {desc})"
 
 
 def _chunk_for_tts(text: str, limit: int = 240) -> list[str]:
