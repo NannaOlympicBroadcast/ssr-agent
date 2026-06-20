@@ -53,6 +53,14 @@ ENV_TEMPLATE = """\
 GEMINI_API_KEY=
 TAVILY_API_KEY=
 DEFAULT_MODEL=gemini-3.1-flash-lite
+
+# Event bus (optional). Every main process starts a non-blocking bus server so
+# external scripts / other agents can connect; set an api key to require auth.
+# SSR_BUS_API_KEY=
+# SSR_BUS_HOST=127.0.0.1
+# SSR_BUS_PORT=8765
+# SSR_BUS_SERVE=1          # set 0 to disable the embedded server
+# SSR_BUS_URL=             # bridge to an external bus server instead
 """
 
 MCP_TEMPLATE = """\
@@ -518,16 +526,57 @@ def cmd_models(args, settings: Settings, console: Console) -> int:
     return 0
 
 
+_EMBEDDED_BUS_SERVER = None  # keep a reference so the server thread isn't GC'd
+
+
+def ensure_bus_server(settings: Settings, console: Console | None = None) -> None:
+    """Start this main process's embedded, non-blocking bus server.
+
+    Best-effort and idempotent. Honours ``settings.bus_serve`` (on by default).
+    If the port is already bound — another ``ssr`` process owns the server — we
+    just reuse it. Either way ``settings.bus_url`` is pointed at the server so
+    the agent bridges its in-process bus to it (with api-key auth when set).
+    """
+    global _EMBEDDED_BUS_SERVER
+    if not getattr(settings, "bus_serve", False):
+        return
+    if settings.bus_url:  # an explicit remote bus was configured; defer to it
+        return
+    if _EMBEDDED_BUS_SERVER is not None:
+        return
+    host, port = settings.bus_host, settings.bus_port
+    url = f"ws://{host}:{port}"
+    from .bus.server import serve_in_thread
+
+    try:
+        _EMBEDDED_BUS_SERVER, _ = serve_in_thread(host, port, api_key=settings.bus_api_key)
+        if console:
+            note = " (api-key required)" if settings.bus_api_key else ""
+            console.print(f"[dim]bus server listening on {url}{note}[/dim]")
+    except OSError:
+        # Port already in use → an existing ssr bus server; bridge to it instead.
+        if console:
+            console.print(f"[dim]bus already running at {url}; bridging to it[/dim]")
+    except Exception as e:  # never let bus setup break startup
+        if console:
+            console.print(f"[yellow]bus server could not start: {e}[/yellow]")
+        return
+    settings.bus_url = url
+
+
 def cmd_bus(args, settings: Settings, console: Console) -> int:
     """Run / interact with the SSR event bus."""
     action = args.bus_action
 
+    api_key = getattr(args, "api_key", None) or settings.bus_api_key
+
     if action == "serve":
         from .bus.server import run_server as run_bus_server
 
-        console.print(f"[cyan]Starting SSR bus server on ws://{args.host}:{args.port}[/cyan]")
+        note = " [dim](api-key required)[/dim]" if api_key else ""
+        console.print(f"[cyan]Starting SSR bus server on ws://{args.host}:{args.port}[/cyan]{note}")
         try:
-            run_bus_server(host=args.host, port=args.port)
+            run_bus_server(host=args.host, port=args.port, api_key=api_key)
         except Exception as e:
             console.print(f"[red]Bus server error: {e}[/red]")
             return 1
@@ -539,25 +588,46 @@ def cmd_bus(args, settings: Settings, console: Console) -> int:
     if action == "send":
         import json
 
-        try:
-            payload = json.loads(args.payload) if args.payload else {}
-        except json.JSONDecodeError as e:
-            console.print(f"[red]Invalid JSON payload: {e}[/red]")
-            return 1
-        client = BusClient(url, source="ssr-cli")
+        raw = args.payload
+        if not raw:
+            payload = {}
+        else:
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                # Not valid JSON: either a plain string, or the shell mangled the
+                # quotes (common on Windows PowerShell, which strips the inner
+                # double quotes of '{"k":"v"}'). Degrade gracefully by sending
+                # the raw text as a {"text": ...} payload instead of erroring.
+                console.print(
+                    "[yellow]Payload is not valid JSON; sending it as "
+                    '{"text": ...}.[/yellow]\n'
+                    "[dim]Tip (PowerShell): wrap JSON in single quotes and escape "
+                    'inner quotes, e.g. \'{\\"msg\\": \\"hi\\"}\', or use the '
+                    "stop-parsing token: ssr bus send topic --% '{\"msg\":\"hi\"}'[/dim]"
+                )
+                payload = {"text": raw}
+        if not isinstance(payload, dict):
+            payload = {"value": payload}
+        client = BusClient(url, source="ssr-cli", api_key=api_key)
         try:
             client.connect()
-            event = client.publish(args.topic, payload if isinstance(payload, dict) else {"value": payload})
+            event = client.publish(args.topic, payload)
             console.print(f"[green]Published[/green] {event.get('id', '')} on '{args.topic}'.")
         except Exception as e:
             console.print(f"[red]Could not send: {e}[/red]")
+            if isinstance(e, OSError):
+                console.print(
+                    f"[dim]Is a bus server running at {url}? "
+                    "Start one with [bold]ssr bus serve[/bold].[/dim]"
+                )
             return 1
         finally:
             client.close()
         return 0
 
     if action == "listen":
-        client = BusClient(url, source="ssr-cli")
+        client = BusClient(url, source="ssr-cli", api_key=api_key)
         seen = {"n": 0}
         import threading
 
@@ -584,7 +654,7 @@ def cmd_bus(args, settings: Settings, console: Console) -> int:
         return 0
 
     if action == "status":
-        client = BusClient(url, source="ssr-cli")
+        client = BusClient(url, source="ssr-cli", api_key=api_key)
         try:
             client.connect()
             info = client.ping()
@@ -923,16 +993,20 @@ def build_parser() -> argparse.ArgumentParser:
     bserve = bsub.add_parser("serve", help="run a remote bus server")
     bserve.add_argument("--host", default="127.0.0.1", help="host to bind")
     bserve.add_argument("--port", type=int, default=8765, help="port to bind")
+    bserve.add_argument("--api-key", dest="api_key", help="require this api key (default: $SSR_BUS_API_KEY)")
     bsend = bsub.add_parser("send", help="publish an event to a bus server")
     bsend.add_argument("topic")
     bsend.add_argument("payload", nargs="?", default="", help="JSON object payload")
     bsend.add_argument("--url", help="bus server URL (default: $SSR_BUS_URL or ws://127.0.0.1:8765)")
+    bsend.add_argument("--api-key", dest="api_key", help="bus api key (default: $SSR_BUS_API_KEY)")
     blisten = bsub.add_parser("listen", help="subscribe and print matching events")
     blisten.add_argument("pattern", nargs="?", default="**", help="topic pattern, e.g. 'task.*'")
     blisten.add_argument("--url", help="bus server URL")
+    blisten.add_argument("--api-key", dest="api_key", help="bus api key (default: $SSR_BUS_API_KEY)")
     blisten.add_argument("--count", type=int, default=0, help="exit after N events (0 = forever)")
     bstatus = bsub.add_parser("status", help="ping a bus server and show recent events")
     bstatus.add_argument("--url", help="bus server URL")
+    bstatus.add_argument("--api-key", dest="api_key", help="bus api key (default: $SSR_BUS_API_KEY)")
 
     gw = sub.add_parser("gateway", help="install a channel-bound SSR instance as a system service")
     gwsub = gw.add_subparsers(dest="gateway_action", required=True)
@@ -979,10 +1053,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.experimental_acp:
         # ACP speaks pure JSON-RPC 2.0 on stdout — keep stdout clean and route
         # all setup/diagnostic output to stderr so the protocol isn't corrupted.
-        _first_run_setup(settings, Console(stderr=True))
+        err_console = Console(stderr=True)
+        _first_run_setup(settings, err_console)
+        ensure_bus_server(settings, err_console)
         return cmd_acp(settings)
 
     _first_run_setup(settings, console)
+    # The main process hosts a non-blocking bus server so external scripts and
+    # other agents can talk to this agent's bus. Skip it for commands that are
+    # not running an agent (or are the bus server themselves).
+    if args.command not in ("init", "index", "bus", "task", "models"):
+        ensure_bus_server(settings, console)
     if args.command == "init":
         return cmd_init(args, settings, console)
     if args.command == "ask":

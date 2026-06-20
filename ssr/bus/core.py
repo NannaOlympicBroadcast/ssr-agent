@@ -17,6 +17,7 @@ id keeps a bridged event from echoing back and forth.
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
@@ -139,11 +140,19 @@ class MessageBus:
         pattern: str,
         timeout: float | None = None,
         predicate: Callable[[BusEvent], bool] | None = None,
+        cancel: "threading.Event | None" = None,
+        poll_interval: float = 0.25,
     ) -> BusEvent | None:
         """Block until an event matching ``pattern`` arrives; return it or ``None``.
 
         This is the primitive behind "suspend the session until X happens": it
         installs a one-shot listener and waits on an :class:`threading.Event`.
+
+        When ``cancel`` is supplied the wait is *interruptible*: instead of one
+        long blocking ``wait`` it polls in ``poll_interval`` slices and returns
+        early (with ``None``) as soon as ``cancel`` is set. This keeps the
+        calling turn responsive to ``/stop`` while still using a single listener
+        (so no event published mid-wait is missed).
         """
         done = threading.Event()
         box: dict[str, BusEvent] = {}
@@ -156,7 +165,19 @@ class MessageBus:
 
         listener_id = self.subscribe(pattern, _capture)
         try:
-            done.wait(timeout=timeout)
+            if cancel is None:
+                done.wait(timeout=timeout)
+            else:
+                deadline = None if timeout is None else time.monotonic() + timeout
+                while not done.is_set() and not cancel.is_set():
+                    slice_s = poll_interval
+                    if deadline is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        slice_s = min(poll_interval, remaining)
+                    if done.wait(timeout=slice_s):
+                        break
         finally:
             self.unsubscribe(listener_id)
         return box.get("event")

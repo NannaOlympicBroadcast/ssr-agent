@@ -47,6 +47,20 @@ def ssr_home() -> Path:
     return Path(raw).expanduser()
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class Settings:
     """Resolved runtime configuration."""
@@ -57,6 +71,12 @@ class Settings:
     tavily_api_key: str | None = None
     default_model: str = DEFAULT_MODEL_FALLBACK
     bus_url: str | None = None  # remote bus server, e.g. ws://host:8765 (SSR_BUS_URL)
+    # Embedded bus server: every main process starts a non-blocking remote bus
+    # server (so external scripts / other agents can connect) unless disabled.
+    bus_serve: bool = True
+    bus_host: str = "127.0.0.1"
+    bus_port: int = 8765
+    bus_api_key: str | None = None  # shared secret required to talk to the bus
     extra: dict[str, str] = field(default_factory=dict)
 
     # --- derived paths -----------------------------------------------------
@@ -162,6 +182,10 @@ def load_settings(project_dir: str | os.PathLike | None = None) -> Settings:
         tavily_api_key=os.environ.get("TAVILY_API_KEY"),
         default_model=os.environ.get("DEFAULT_MODEL", DEFAULT_MODEL_FALLBACK),
         bus_url=os.environ.get("SSR_BUS_URL") or None,
+        bus_serve=_env_bool("SSR_BUS_SERVE", True),
+        bus_host=os.environ.get("SSR_BUS_HOST", "127.0.0.1"),
+        bus_port=_env_int("SSR_BUS_PORT", 8765),
+        bus_api_key=os.environ.get("SSR_BUS_API_KEY") or None,
     )
     # Make the key visible to google-genai / google-adk which look up GOOGLE_API_KEY.
     if settings.gemini_api_key:

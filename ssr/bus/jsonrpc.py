@@ -16,6 +16,7 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 BUS_ERROR = -32000
+UNAUTHORIZED = -32001  # missing / invalid bus api key
 
 
 class JsonRpcError(Exception):

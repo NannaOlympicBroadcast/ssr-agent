@@ -33,18 +33,32 @@ from .events import BusEvent, topic_matches
 
 
 class _Peer:
-    def __init__(self, ws):
+    def __init__(self, ws, authenticated: bool = True):
         self.ws = ws
         self.id = uuid.uuid4().hex[:12]
         self.subscriptions: dict[str, str] = {}  # subscription_id -> pattern
+        # When the server requires an api key a peer starts unauthenticated and
+        # may only call ``bus.auth`` until it presents the right key.
+        self.authenticated = authenticated
 
 
 class BusServer:
-    """Brokers events between connected WebSocket peers."""
+    """Brokers events between connected WebSocket peers.
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8765, name: str = "ssr-bus"):
+    When ``api_key`` is set, every peer must authenticate (call ``bus.auth``
+    with the matching key) before any other method is accepted.
+    """
+
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+        name: str = "ssr-bus",
+        api_key: str | None = None,
+    ):
         self.host = host
         self.port = port
+        self.api_key = api_key or None
         self.bus = MessageBus(name=name, source=name)
         self._peers: dict[str, _Peer] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -59,10 +73,16 @@ class BusServer:
             await asyncio.Future()  # run forever
 
     async def _handler(self, ws, *_args) -> None:
-        peer = _Peer(ws)
+        peer = _Peer(ws, authenticated=self.api_key is None)
         self._peers[peer.id] = peer
         try:
-            await self._send(ws, jsonrpc.notification("bus.welcome", {"peer_id": peer.id}))
+            await self._send(
+                ws,
+                jsonrpc.notification(
+                    "bus.welcome",
+                    {"peer_id": peer.id, "requires_auth": self.api_key is not None},
+                ),
+            )
             async for raw in ws:
                 await self._on_message(peer, raw)
         except Exception:
@@ -93,6 +113,21 @@ class BusServer:
                 await self._send(peer.ws, jsonrpc.error(mid, jsonrpc.INTERNAL_ERROR, str(e)))
 
     async def _dispatch(self, peer: _Peer, method: str, params: dict):
+        if method == "bus.auth":
+            if self.api_key is None:
+                peer.authenticated = True
+                return {"ok": True, "required": False}
+            if str(params.get("key") or "") == self.api_key:
+                peer.authenticated = True
+                return {"ok": True, "required": True}
+            raise jsonrpc.JsonRpcError(jsonrpc.UNAUTHORIZED, "invalid bus api key")
+
+        # Gate every other method behind authentication when a key is required.
+        if not peer.authenticated:
+            raise jsonrpc.JsonRpcError(
+                jsonrpc.UNAUTHORIZED, "authentication required: call bus.auth first"
+            )
+
         if method == "bus.publish":
             topic = params.get("topic")
             if not topic:
@@ -147,9 +182,66 @@ class BusServer:
             pass
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
-    server = BusServer(host=host, port=port)
+def run_server(host: str = "127.0.0.1", port: int = 8765, api_key: str | None = None) -> None:
+    server = BusServer(host=host, port=port, api_key=api_key)
     try:
         asyncio.run(server.serve())
     except KeyboardInterrupt:
         print("\n[ssr-bus] shutting down")
+
+
+def serve_in_thread(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    api_key: str | None = None,
+    name: str = "ssr-bus",
+    ready_timeout: float = 5.0,
+) -> tuple["BusServer", "threading.Thread"]:
+    """Start a :class:`BusServer` on a daemon thread and return once it is bound.
+
+    Non-blocking: the websocket server runs on its own asyncio loop in a
+    background thread so the caller (an SSR main process) keeps running. Raises
+    the bind error (e.g. :class:`OSError` when the port is already in use) so the
+    caller can decide to reuse an existing server instead.
+    """
+    import threading
+
+    server = BusServer(host=host, port=port, name=name, api_key=api_key)
+    ready = threading.Event()
+    box: dict[str, BaseException] = {}
+
+    def _run() -> None:
+        import websockets
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        server._loop = loop
+
+        async def _serve() -> None:
+            try:
+                ws_server = await websockets.serve(
+                    server._handler, host, port, max_size=8 * 1024 * 1024
+                )
+            except BaseException as e:  # bind failure, etc.
+                box["error"] = e
+                ready.set()
+                return
+            ready.set()
+            try:
+                async with ws_server:
+                    await asyncio.Future()  # run forever
+            except asyncio.CancelledError:  # pragma: no cover - shutdown
+                pass
+
+        try:
+            loop.run_until_complete(_serve())
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_run, daemon=True, name=name)
+    thread.start()
+    if not ready.wait(ready_timeout):
+        raise TimeoutError(f"bus server failed to start on {host}:{port}")
+    if "error" in box:
+        raise box["error"]
+    return server, thread

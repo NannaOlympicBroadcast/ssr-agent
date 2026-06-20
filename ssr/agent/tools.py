@@ -438,11 +438,29 @@ class ToolKit:
         """
         import json
 
+        # Tool arguments may arrive as strings (e.g. timeout="120"); coerce so
+        # numeric comparisons below don't raise TypeError.
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            timeout = 60.0
+
         bus = self._bus()
         if bus is None:
             return "ERROR: bus not available in this context"
-        event = bus.wait_for(pattern, timeout=timeout if timeout and timeout > 0 else None)
+        # Pass the agent's stop flag so the wait stays interruptible: /stop ends
+        # it promptly instead of freezing the turn for the whole timeout, which
+        # also keeps the session responsive to concurrent /btw side-questions.
+        agent = getattr(self, "agent_instance", None)
+        cancel = getattr(agent, "_stop_event", None)
+        event = bus.wait_for(
+            pattern,
+            timeout=timeout if timeout and timeout > 0 else None,
+            cancel=cancel,
+        )
         if event is None:
+            if cancel is not None and cancel.is_set():
+                return f"INTERRUPTED: stopped waiting for '{pattern}' (/stop)."
             return f"TIMEOUT: no event matching '{pattern}' within {timeout}s."
         return "Received event:\n" + json.dumps(event.to_dict(), ensure_ascii=False, indent=2)
 
@@ -480,6 +498,10 @@ class ToolKit:
             pattern: Topic pattern to filter by (defaults to everything).
             limit: Maximum number of events to return.
         """
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 10
         bus = self._bus()
         if bus is None:
             return "ERROR: bus not available in this context"

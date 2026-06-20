@@ -93,10 +93,14 @@ class SSRAgent:
         self._bus_bridge = None
         # Listeners that should wake the agent with a new turn when they fire.
         self._bus_notify_listeners: dict[str, str] = {}  # listener_id -> pattern
+        # Serialize bus-triggered wake turns so simultaneous events don't run
+        # overlapping run() calls that race on the shared conversation history.
+        self._bus_wake_lock = threading.Lock()
         url = getattr(self.settings, "bus_url", None)
+        api_key = getattr(self.settings, "bus_api_key", None)
         if url:
             try:
-                self._bus_bridge = RemoteBusBridge(self.bus, url).start()
+                self._bus_bridge = RemoteBusBridge(self.bus, url, api_key=api_key).start()
             except Exception as e:  # never let bus setup break the agent
                 self._emit("warning", text=f"Bus: could not connect to {url}: {e}")
 
@@ -110,7 +114,8 @@ class SSRAgent:
             except Exception:
                 pass
             self._bus_bridge = None
-        self._bus_bridge = RemoteBusBridge(self.bus, url).start()
+        api_key = getattr(self.settings, "bus_api_key", None)
+        self._bus_bridge = RemoteBusBridge(self.bus, url, api_key=api_key).start()
         self.settings.bus_url = url
         return f"Bus bridged to {url}."
 
@@ -135,9 +140,12 @@ class SSRAgent:
         import time as _time
 
         self._emit("bus_event", tag="ssr", topic=event.topic, source=event.source)
-        if self.session_id is None and not self._busy.is_set():
-            # No live session to wake; the event is still recorded in bus history.
-            return
+        # This callback only fires for *deliberate* subscriptions (bus_subscribe
+        # / subscribe_and_notify), so the agent explicitly asked to react to
+        # these events — wake it even when idle (no active session yet). This is
+        # what lets one agent's published event be acted on by another agent that
+        # is merely subscribed and waiting. Bus-triggered turns are serialized so
+        # concurrent events don't race on the shared conversation history.
 
         def run_wakeup():
             _time.sleep(0.2)
@@ -150,7 +158,8 @@ class SSRAgent:
                 f"Payload: {payload}. Decide whether and how to act on it."
             )
             try:
-                reply = self.run(prompt)
+                with self._bus_wake_lock:
+                    reply = self.run(prompt)
                 self._emit("thinking", tag="ssr", text=f"\n[ssr ▸] {reply}\n")
                 active_ctx = getattr(self, "active_im_context", None)
                 if active_ctx:
@@ -587,6 +596,10 @@ class SSRAgent:
 
         try:
             sub_toolkit = ToolKit(self.settings, self.retriever, self.memory, sub_agent_runner=None)
+            # Share the parent agent so the sub-agent's bus / memory / emit tools
+            # work (without this, bus_wait/bus_subscribe/bus_history all report
+            # "bus not available in this context").
+            sub_toolkit.agent_instance = self
             prompt = task if not context else f"Context:\n{context}\n\nTask:\n{task}"
             contents = [types.Content(role="user", parts=[types.Part(text=prompt)])]
             self._emit("sub_agent", tag="sub", task=task)

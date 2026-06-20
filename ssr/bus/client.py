@@ -34,10 +34,17 @@ from .events import BusEvent, topic_matches
 class BusClient:
     """Synchronous-friendly JSON-RPC bus client over WebSocket."""
 
-    def __init__(self, url: str, source: str = "", connect_timeout: float = 10.0):
+    def __init__(
+        self,
+        url: str,
+        source: str = "",
+        connect_timeout: float = 10.0,
+        api_key: str | None = None,
+    ):
         self.url = url
         self.source = source or f"client:{uuid.uuid4().hex[:6]}"
         self.connect_timeout = connect_timeout
+        self.api_key = api_key or None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ws = None
@@ -58,6 +65,10 @@ class BusClient:
             raise TimeoutError(f"bus connect to {self.url} timed out")
         if self._connect_error is not None:
             raise self._connect_error
+        # Authenticate before any other call so the server accepts subsequent
+        # subscribe/publish requests (a no-op when the server requires no key).
+        if self.api_key:
+            self._call("bus.auth", {"key": self.api_key})
         return self
 
     def _run_loop(self) -> None:
@@ -196,11 +207,11 @@ class RemoteBusBridge:
     server echoes back is not re-dispatched.
     """
 
-    def __init__(self, bus: MessageBus, url: str, pattern: str = "**"):
+    def __init__(self, bus: MessageBus, url: str, pattern: str = "**", api_key: str | None = None):
         self.bus = bus
         self.url = url
         self.pattern = pattern
-        self.client = BusClient(url, source=bus.source)
+        self.client = BusClient(url, source=bus.source, api_key=api_key)
 
     def start(self) -> "RemoteBusBridge":
         self.client.connect()
