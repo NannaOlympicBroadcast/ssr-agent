@@ -121,11 +121,11 @@ def _import_miservice():
         from miservice import MiAccount, MiNAService, MiTokenStore  # noqa: F401
     except ImportError:
         missing.append("miservice_fork")
-    if missing:  # pragma: no cover - optional dependency
+    if missing:  # pragma: no cover - core deps, only if the env is broken
         raise XiaomiUnavailable(
-            "小爱音箱接入缺少依赖：" + ", ".join(missing) + "。请安装其一：\n"
-            '  pip install "ssr-agent[xiaomi]"\n'
-            "  # 或直接安装： pip install miservice_fork aiohttp\n"
+            "小爱音箱接入缺少依赖：" + ", ".join(missing) + "。\n"
+            "这些包已是 ssr-agent 的核心依赖；若仍缺失，请在当前环境重新安装：\n"
+            "  pip install -e .   # 或： pip install miservice_fork aiohttp\n"
             "注意：是 'miservice_fork'（不是同名的 'miservice'），它提供 MiTokenStore。"
         )
     return MiAccount, MiNAService, MiTokenStore
