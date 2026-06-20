@@ -72,11 +72,17 @@ def _first_run_setup(settings: Settings, console: Console) -> None:
     installed = install_builtin_skills(settings.skills_dir)
     if installed:
         console.print(f"[green]Installed built-in skills:[/green] {', '.join(installed)}")
+    from .plugins import install_builtin_plugins
+    plugins = install_builtin_plugins(settings.plugins_dir)
+    if plugins:
+        console.print(f"[green]Installed built-in plugins:[/green] {', '.join(plugins)}")
 
 
 def cmd_init(args, settings: Settings, console: Console) -> int:
     _first_run_setup(settings, console)
     install_builtin_skills(settings.skills_dir, force=True)
+    from .plugins import install_builtin_plugins
+    install_builtin_plugins(settings.plugins_dir, force=True)
     console.print(f"[green]✓[/green] SSR home ready at [bold]{settings.home}[/bold]")
     console.print(f"  Edit [bold]{settings.env_file}[/bold] to add GEMINI_API_KEY / TAVILY_API_KEY")
     return 0

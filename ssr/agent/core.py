@@ -43,7 +43,7 @@ class SSRAgent:
         self.models_config = ModelsConfig(settings)
         # Spawn the MCP servers declared in ~/.ssr/mcp.json and enumerate their
         # tools. Failures are isolated per-server (the agent still runs).
-        self.mcp_manager = _start_mcp_manager(settings.mcp_config)
+        self.mcp_manager = _start_mcp_manager(settings)
         self.mcp_tools = self.mcp_manager.tools
         # Per-tool specs seed the 'tools' context category (so MCP tools are
         # retrievable); fall back to server-level specs if nothing started.
@@ -513,14 +513,16 @@ class SSRAgent:
         )
 
 
-def _start_mcp_manager(mcp_path: Path) -> MCPManager:
-    """Build an :class:`MCPManager` from the config and start its servers.
+def _start_mcp_manager(settings: Settings) -> MCPManager:
+    """Build an :class:`MCPManager` from ``mcp.json`` + plugins and start servers.
 
     Never raises: if anything goes wrong an empty (no-op) manager is returned so
     the agent keeps working without MCP.
     """
     try:
-        manager = MCPManager.from_config(mcp_path)
+        from ..plugins import merged_mcp_servers
+
+        manager = MCPManager.from_server_configs(merged_mcp_servers(settings))
         manager.start_all()
         return manager
     except Exception:  # pragma: no cover - defensive

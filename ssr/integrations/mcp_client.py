@@ -294,8 +294,19 @@ class MCPManager:
 
     @classmethod
     def from_config(cls, config_path: Path, timeout: float = _DEFAULT_TIMEOUT) -> "MCPManager":
+        return cls.from_server_configs(_read_server_configs(config_path), timeout=timeout)
+
+    @classmethod
+    def from_server_configs(
+        cls, server_configs: dict[str, dict], timeout: float = _DEFAULT_TIMEOUT
+    ) -> "MCPManager":
+        """Build a manager from an already-merged ``{name: cfg}`` mapping.
+
+        This is the shared path for both ``mcp.json`` and bundled/user *plugins*
+        (which contribute additional ``mcpServers``).
+        """
         servers: list[MCPServer] = []
-        for name, cfg in _read_server_configs(config_path).items():
+        for name, cfg in (server_configs or {}).items():
             if cfg.get("disabled"):
                 continue
             command = cfg.get("command")
