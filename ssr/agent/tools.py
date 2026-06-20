@@ -20,6 +20,7 @@ from .memory import MemoryStore
 
 _MAX_OUTPUT = 12_000
 _MAX_READ = 60_000
+_MAX_FILE_SEND = 16 * 1024 * 1024  # cap a single file transfer at ~16 MB (ws max_size)
 
 
 def decode_output(data: bytes | None) -> str:
@@ -229,6 +230,60 @@ class ToolKit:
         """
         return self.terminal.kill(terminal_id)
 
+    def send_file_to_user(self, path: str, caption: str = "") -> str:
+        """Send a local file to the user so they can download/receive it.
+
+        In a remote-control (rc) web session the file is streamed to the browser
+        for download. Use this to deliver generated artifacts (reports, images,
+        archives, build outputs) to the user.
+
+        Args:
+            path: Path to the local file, absolute or relative to the project dir.
+            caption: Optional short note shown alongside the file.
+        """
+        import base64
+        import mimetypes
+
+        p = self._resolve(path)
+        if not p.is_file():
+            return f"ERROR: no such file: {p}"
+        data = p.read_bytes()
+        if len(data) > _MAX_FILE_SEND:
+            return f"ERROR: file too large to send ({len(data)} bytes; limit {_MAX_FILE_SEND})."
+        agent = getattr(self, "agent_instance", None)
+        ctx = getattr(agent, "active_im_context", None) if agent is not None else None
+        mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+
+        if agent is not None and ctx and ctx[0] == "rc":
+            agent._emit(
+                "file",
+                tag="ssr",
+                name=p.name,
+                size=len(data),
+                mime=mime,
+                caption=caption,
+                data_b64=base64.b64encode(data).decode("ascii"),
+            )
+            return f"Sent file '{p.name}' ({len(data)} bytes) to the user."
+
+        # Other channels with native file support (feishu/wechat).
+        if ctx and ctx[0] in ("feishu", "wechat"):
+            try:
+                import ssr.channels  # ensure channels are registered
+                from ssr.channels.registry import registry
+
+                channel = registry.get(ctx[0])
+                if channel is not None:
+                    channel.send_file(ctx[1], str(p), mime)
+                    return f"Sent file '{p.name}' to {ctx[0]}."
+            except Exception as e:
+                return f"ERROR: could not send file via {ctx[0]}: {e}"
+
+        return (
+            f"File is ready at {p} ({len(data)} bytes). "
+            "Direct file delivery is only available in remote-control / IM sessions."
+        )
+
     def push_notification(self, channel: str, target: str, message: str) -> str:
         """Send a message or notification to a specific channel (e.g. feishu, wechat) and recipient.
 
@@ -362,6 +417,7 @@ class ToolKit:
             self.spawn_sub_agent,
             self.reindex_context,
             self.push_notification,
+            self.send_file_to_user,
         ]
 
     def specs(self) -> list[dict]:
