@@ -18,10 +18,13 @@ The heavy lifting (Mi passport login, signing, token cache) is delegated to the
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..config import Settings
+
+logger = logging.getLogger("ssr.xiaomi")
 
 
 # --------------------------------------------------------------------- config
@@ -149,15 +152,27 @@ class XiaomiSpeaker:
         import aiohttp
 
         MiAccount, MiNAService, MiTokenStore = _import_miservice()
+        tok = token_path(self.settings)
+        logger.info(
+            "connecting to Mi cloud: account=%s region=%s token_store=%s",
+            self.cfg.account or "(empty!)", self.cfg.server_country, tok,
+        )
+        if not self.cfg.account or not self.cfg.password:
+            raise RuntimeError("Mi account/password is empty — run: ssr channel config xiaomi")
         self._session = aiohttp.ClientSession()
         self._account = MiAccount(
             self._session,
             self.cfg.account,
             self.cfg.password,
-            MiTokenStore(str(token_path(self.settings))),
+            MiTokenStore(str(tok)),
         )
         self._mina = MiNAService(self._account)
+        logger.info("Mi account/MiNAService initialised; selecting speaker…")
         self.device = await self._select_device()
+        logger.info(
+            "selected speaker: name=%r deviceID=%s hardware=%s did=%s",
+            self.device.name, self.device.device_id, self.device.hardware, self.device.did,
+        )
 
     async def close(self) -> None:
         if self._session is not None:
@@ -168,7 +183,18 @@ class XiaomiSpeaker:
             self._session = None
 
     async def _select_device(self) -> SpeakerDevice:
-        devices = await self._mina.device_list() or []
+        try:
+            devices = await self._mina.device_list() or []
+        except Exception:
+            logger.exception("device_list() failed (login or network problem)")
+            raise
+        logger.info("device_list returned %d device(s)", len(devices))
+        for d in devices:
+            logger.info(
+                "  device: name=%r deviceID=%s hardware=%s miotDID=%s presence=%s",
+                d.get("name"), d.get("deviceID"), d.get("hardware"),
+                d.get("miotDID"), d.get("presence"),
+            )
         if not devices:
             raise RuntimeError("未发现小爱设备，请确认账号下已绑定音箱。")
 
@@ -180,6 +206,12 @@ class XiaomiSpeaker:
             return False
 
         chosen = next((d for d in devices if matches(d)), devices[0])
+        if not (self.cfg.minaDeviceId or self.cfg.speakerName):
+            logger.warning(
+                "no minaDeviceId/speakerName configured — defaulting to the first device %r. "
+                "If that's the wrong speaker, set it via 'ssr channel config xiaomi'.",
+                chosen.get("name"),
+            )
         return SpeakerDevice(
             device_id=chosen.get("deviceID", ""),
             name=chosen.get("name", ""),
@@ -188,29 +220,47 @@ class XiaomiSpeaker:
         )
 
     async def latest_ask(self) -> tuple[str, str] | None:
-        """Return ``(request_id, question)`` for the most recent spoken query."""
+        """Return ``(request_id, question)`` for the most recent spoken query.
+
+        Picks the message with the greatest ``timestamp_ms`` so the dedup id in
+        the poll loop always tracks the newest utterance. Errors are logged (not
+        swallowed) so a misconfigured/expired session is visible in the logs.
+        """
         assert self.device is not None
         try:
             messages = await self._mina.get_latest_ask(self.device.device_id) or []
         except Exception:
+            logger.exception("get_latest_ask() failed for device %s", self.device.device_id)
             return None
+
+        logger.debug("get_latest_ask -> %d message(s): %s", len(messages), messages)
+        best: tuple[int, str, str] | None = None  # (timestamp_ms, request_id, question)
         for msg in messages:
+            ts = int(msg.get("timestamp_ms") or 0)
+            rid = str(msg.get("request_id") or ts)
             answers = (msg.get("response") or {}).get("answer") or []
             for ans in answers:
                 question = (ans.get("question") or "").strip()
-                if question:
-                    return (str(msg.get("request_id") or msg.get("timestamp_ms") or question), question)
-        return None
+                if question and (best is None or ts >= best[0]):
+                    best = (ts, rid, question)
+        if best is None:
+            return None
+        return (best[1], best[2])
 
     async def speak(self, text: str) -> None:
         assert self.device is not None
         if not text:
             return
         # XiaoAI TTS rejects very long strings; chunk on sentence boundaries.
-        for chunk in _chunk_for_tts(text):
+        chunks = _chunk_for_tts(text)
+        logger.info("speaking %d chunk(s) to %s", len(chunks), self.device.device_id)
+        for i, chunk in enumerate(chunks):
             try:
-                await self._mina.text_to_speech(self.device.device_id, chunk)
+                result = await self._mina.text_to_speech(self.device.device_id, chunk)
+                logger.info("  TTS chunk %d/%d ok (%d chars), result=%s",
+                            i + 1, len(chunks), len(chunk), result)
             except Exception:
+                logger.exception("  TTS chunk %d/%d failed; aborting remaining chunks", i + 1, len(chunks))
                 break
 
 
