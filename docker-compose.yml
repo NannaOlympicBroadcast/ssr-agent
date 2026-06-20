@@ -1,0 +1,56 @@
+# SSR Agent — Docker Compose deployment.
+#
+# Quick start:
+#   1. Put your keys in a .env file next to this one (see .env.example):
+#        GEMINI_API_KEY=...
+#        TAVILY_API_KEY=...
+#   2. Build & run the OpenAI-compatible API server:
+#        docker compose up -d ssr
+#   3. To run a messaging channel instead, configure it once into the volume,
+#        then start the `channel` service (see below).
+#
+# All state lives in the named `ssr-data` volume (mounted at /data, with
+# SSR_HOME=/data/.ssr) so credentials/tokens/sessions persist across restarts.
+
+services:
+  # ---- OpenAI-compatible HTTP API server (default) -----------------------
+  ssr:
+    build:
+      context: .
+      args:
+        INSTALL_NODE: "false"
+    image: ssr-agent:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SSR_HOME: /data/.ssr
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-gemini-3.1-flash-lite}
+    volumes:
+      - ssr-data:/data
+    ports:
+      - "8000:8000"
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
+
+  # ---- Messaging channel gateway (XiaoAI / Feishu / WeChat) --------------
+  # Enable with:  docker compose --profile channel up -d channel
+  # Configure credentials first, e.g. interactively into the same volume:
+  #   docker compose run --rm channel channel config xiaomi
+  channel:
+    image: ssr-agent:latest
+    build:
+      context: .
+    profiles: ["channel"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SSR_HOME: /data/.ssr
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-gemini-3.1-flash-lite}
+    volumes:
+      - ssr-data:/data
+    # Change "xiaomi" to feishu / wechat / all as needed.
+    command: ["channel", "on", "xiaomi"]
+
+volumes:
+  ssr-data:

@@ -215,6 +215,80 @@ def cmd_channel(args, settings: Settings, console: Console) -> int:
     return 0
 
 
+def cmd_gateway(args, settings: Settings, console: Console) -> int:
+    from .integrations import gateway as gw
+
+    action = args.gateway_action
+
+    if action == "run":
+        # Foreground entrypoint used by the installed system service.
+        return gw.run_gateway(settings, args.name)
+
+    if action == "install":
+        if args.channel not in gw.VALID_CHANNELS:
+            console.print(f"[red]Unknown channel '{args.channel}'. Choose from: {', '.join(gw.VALID_CHANNELS)}[/red]")
+            return 1
+        record = gw.Gateway(name=args.name, channel=args.channel, cwd=args.cwd or "")
+        gw.add_gateway(settings, record)
+        mgr = gw.get_manager()
+        console.print(f"[dim]service backend: {mgr.backend}[/dim]")
+        msg = mgr.install(settings, record, start=not args.no_start)
+        console.print(f"[green]✓[/green] Gateway [bold]{args.name}[/bold] → channel [cyan]{args.channel}[/cyan]")
+        console.print(msg)
+        return 0
+
+    if action == "uninstall":
+        mgr = gw.get_manager()
+        console.print(mgr.uninstall(settings, args.name))
+        if gw.remove_gateway(settings, args.name):
+            console.print(f"[green]✓[/green] Gateway '{args.name}' removed.")
+        else:
+            console.print(f"[yellow]No gateway record named '{args.name}'.[/yellow]")
+        return 0
+
+    if action in ("start", "stop", "restart"):
+        if gw.get_gateway(settings, args.name) is None:
+            console.print(f"[red]No gateway named '{args.name}'. Install it first.[/red]")
+            return 1
+        mgr = gw.get_manager()
+        console.print(getattr(mgr, action)(settings, args.name))
+        return 0
+
+    if action == "status":
+        mgr = gw.get_manager()
+        gateways = gw.load_gateways(settings)
+        if args.name:
+            gateways = {args.name: gateways[args.name]} if args.name in gateways else {}
+            if not gateways:
+                console.print(f"[red]No gateway named '{args.name}'.[/red]")
+                return 1
+        if not gateways:
+            console.print("[yellow]No gateways installed. Create one with: ssr gateway install <name> --channel <channel>[/yellow]")
+            return 0
+        from rich.table import Table
+        table = Table(title=f"SSR Gateways ({mgr.backend})")
+        table.add_column("Name", style="cyan")
+        table.add_column("Channel", style="green")
+        table.add_column("Status", style="bold")
+        table.add_column("CWD", style="dim")
+        for name, record in gateways.items():
+            table.add_row(name, record.channel, mgr.status(settings, name), record.cwd or "-")
+        console.print(table)
+        return 0
+
+    if action == "list":
+        gateways = gw.load_gateways(settings)
+        if not gateways:
+            console.print("[yellow]No gateways installed.[/yellow]")
+            return 0
+        for name, record in gateways.items():
+            console.print(f"- [bold cyan]{name}[/bold cyan] → channel [green]{record.channel}[/green]"
+                          + (f"  cwd={record.cwd}" if record.cwd else ""))
+        return 0
+
+    return 0
+
+
 def cmd_acp(settings: Settings) -> int:
     from .integrations.acp import run_acp
 
@@ -696,6 +770,28 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host to bind the server to")
     serve.add_argument("--port", type=int, default=8000, help="port to bind the server to")
 
+    gw = sub.add_parser("gateway", help="install a channel-bound SSR instance as a system service")
+    gwsub = gw.add_subparsers(dest="gateway_action", required=True)
+    gwi = gwsub.add_parser("install", help="install (and start) a gateway as a system service")
+    gwi.add_argument("name")
+    gwi.add_argument("--channel", required=True, choices=["feishu", "wechat", "xiaomi", "all"],
+                     help="channel this gateway serves")
+    gwi.add_argument("--cwd", help="starting working directory for the agent")
+    gwi.add_argument("--no-start", action="store_true", help="install the service but do not start it")
+    gwu = gwsub.add_parser("uninstall", help="stop and remove a gateway service")
+    gwu.add_argument("name")
+    gwst = gwsub.add_parser("start", help="start an installed gateway service")
+    gwst.add_argument("name")
+    gwsp = gwsub.add_parser("stop", help="stop a running gateway service")
+    gwsp.add_argument("name")
+    gwr = gwsub.add_parser("restart", help="restart a gateway service")
+    gwr.add_argument("name")
+    gwstat = gwsub.add_parser("status", help="show gateway service status")
+    gwstat.add_argument("name", nargs="?")
+    gwsub.add_parser("list", help="list configured gateways")
+    gwrun = gwsub.add_parser("run", help="run a gateway in the foreground (used by the system service)")
+    gwrun.add_argument("name")
+
     return p
 
 
@@ -738,6 +834,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_models(args, settings, console)
     if args.command == "serve":
         return cmd_serve(args, settings, console)
+    if args.command == "gateway":
+        return cmd_gateway(args, settings, console)
 
     return repl(settings, console, turbo_mode=bool(getattr(args, "turbo_mode", False)))
 

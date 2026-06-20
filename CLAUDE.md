@@ -36,7 +36,12 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   model as `mcp__<server>__<tool>` and routed by `SSRAgent`), `remote`
   (`ssr rc` — opens an outbound WebSocket to a dispatch server, registering this
   instance as a *node* and serving filesystem / terminal (PTY) / command /
-  `agent.run` RPCs; config in `~/.ssr/remote.json`).
+  `agent.run` RPCs; config in `~/.ssr/remote.json`), `gateway` (`ssr gateway` —
+  installs a channel-bound instance as a **system service** via the native
+  manager per OS: systemd user unit / launchd plist / Windows scheduled task;
+  records in `~/.ssr/gateways.json`, the service runs `ssr gateway run <name>`).
+- Container deployment: `Dockerfile` + `docker-compose.yml` (`SSR_HOME=/data/.ssr`
+  on the `ssr-data` volume; entrypoint runs `ssr init` then `ssr <command>`).
 
 ## Conventions
 - Keep tools as plain typed functions with docstrings (ADK auto-wraps them).
