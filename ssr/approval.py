@@ -14,6 +14,10 @@ class ApprovalDecision(enum.Enum):
     DENY = "DENY"
 
 class ApprovalHandler(abc.ABC):
+    #: Reason the user gave for the most recent denial (empty when none / approved).
+    #: ``run_command`` reads this back so the agent can adapt instead of retrying.
+    denial_reason: str = ""
+
     @abc.abstractmethod
     def request_approval(self, command: str, context: dict | None = None) -> ApprovalDecision:
         """Prompt/Request user approval for a command."""
@@ -44,9 +48,10 @@ class TUIApprovalHandler(ApprovalHandler):
         self.console = console or Console()
 
     def request_approval(self, command: str, context: dict | None = None) -> ApprovalDecision:
+        self.denial_reason = ""
         self.console.print(f"\n[bold yellow]⚠ Command requires approval:[/bold yellow] [bold cyan]{command}[/bold cyan]")
-        self.console.print("[1] Allow once  [2] Always allow  [3] Deny")
-        
+        self.console.print("[1] Allow once  [2] Always allow  [3] Deny (you may add a reason)")
+
         while True:
             try:
                 choice = input("Choice (1-3): ").strip()
@@ -55,6 +60,13 @@ class TUIApprovalHandler(ApprovalHandler):
                 elif choice == "2":
                     return ApprovalDecision.ALWAYS_ALLOW
                 elif choice == "3":
+                    # Let the user steer the agent instead of just refusing: a
+                    # typed reason is handed back to the model as guidance.
+                    try:
+                        reason = input("Reason / what to do instead (optional): ").strip()
+                    except (KeyboardInterrupt, EOFError):
+                        reason = ""
+                    self.denial_reason = reason
                     return ApprovalDecision.DENY
                 else:
                     self.console.print("[yellow]Invalid choice, please select 1, 2, or 3.[/yellow]")
@@ -76,12 +88,15 @@ class IMApprovalHandler(ApprovalHandler):
         
         approval = PendingApproval(command)
         set_active_approval(approval)
-        
+        self.denial_reason = ""
+
         # Block until event is set or timeout
         signaled = approval.event.wait(timeout=self.timeout)
         set_active_approval(None)
-        
+
         if signaled:
+            if approval.decision == ApprovalDecision.DENY:
+                self.denial_reason = approval.reason
             return approval.decision
         else:
             self.send_fn(target, "❌ Command approval request timed out. Denied.")
@@ -102,11 +117,14 @@ class RCApprovalHandler(ApprovalHandler):
         
         approval = PendingApproval(command)
         set_active_approval(approval)
-        
+        self.denial_reason = ""
+
         signaled = approval.event.wait(timeout=self.timeout)
         set_active_approval(None)
-        
+
         if signaled:
+            if approval.decision == ApprovalDecision.DENY:
+                self.denial_reason = approval.reason
             return approval.decision
         else:
             return ApprovalDecision.DENY

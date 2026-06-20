@@ -179,7 +179,10 @@ class WeChatChannel(AbstractChannel):
         if not self.load_config(settings):
             raise SystemExit("微信机器人未配置或未登录。请先运行: ssr channel config wechat")
 
-        settings.project_dir = Path(self.default_cwd).expanduser()
+        # default_cwd is a starting directory only, not a hard restriction:
+        # the agent may switch with /project and run commands elsewhere.
+        if self.default_cwd:
+            settings.project_dir = Path(self.default_cwd).expanduser()
         agent = SSRAgent(settings)
 
         def send_reply(target_user: str, text: str) -> None:

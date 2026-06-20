@@ -13,6 +13,7 @@ class ContextCategory(str, enum.Enum):
     CONFIGURATIONS = "configurations"
     SKILLS = "skills"
     MEMORY = "memory"
+    REFS = "refs"
 
     @classmethod
     def coerce(cls, value: "str | ContextCategory") -> "ContextCategory":

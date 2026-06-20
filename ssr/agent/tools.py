@@ -67,6 +67,30 @@ class ToolKit:
         self.permission_manager = PermissionManager(settings)
         self.approval_handler = TUIApprovalHandler()
 
+    # -------------------------------------------------------------- approvals
+    def _approval_context(self) -> dict:
+        """Context passed to the approval handler (IM/RC routing target)."""
+        agent = getattr(self, "agent_instance", None)
+        ctx = getattr(agent, "active_im_context", None) if agent is not None else None
+        if ctx:
+            return {"channel": ctx[0], "target": ctx[1]}
+        return {}
+
+    def _denied_message(self) -> str:
+        """Build the tool result for a denied command, including any user reason.
+
+        When the user supplies a reason on denial we hand it back to the model as
+        guidance so it can change course rather than blindly retrying the command.
+        """
+        reason = getattr(self.approval_handler, "denial_reason", "") or ""
+        if reason.strip():
+            return (
+                "Command execution DENIED by the user.\n"
+                f"User's reason / instruction: {reason.strip()}\n"
+                "Do not retry the same command. Follow the user's reason and adapt your approach."
+            )
+        return "ERROR: Command execution denied by user."
+
     # ------------------------------------------------------------------ paths
     def _resolve(self, path: str) -> Path:
         p = Path(path).expanduser()
@@ -118,26 +142,30 @@ class ToolKit:
             entries.append(("📁 " if e.is_dir() else "📄 ") + e.name)
         return "\n".join(entries) or "(empty)"
 
-    def run_command(self, command: str, timeout: int = 120) -> str:
-        """Run a shell command in the project directory and return stdout/stderr.
+    def run_command(self, command: str, timeout: int = 120, cwd: str = "") -> str:
+        """Run a shell command and return stdout/stderr.
 
         Args:
             command: The shell command line to execute.
             timeout: Maximum seconds to wait before aborting.
+            cwd: Optional working directory. Defaults to the project directory,
+                but may be any absolute or relative path so commands are not
+                restricted to the default directory (useful in channel mode).
         """
         res = self.permission_manager.check_permission(command)
         if res == PermissionResult.NEEDS_APPROVAL:
-            decision = self.approval_handler.request_approval(command)
+            decision = self.approval_handler.request_approval(command, self._approval_context())
             if decision == ApprovalDecision.ALWAYS_ALLOW:
                 self.permission_manager.add_always_allow(command)
             elif decision == ApprovalDecision.DENY:
-                return "ERROR: Command execution denied by user."
+                return self._denied_message()
 
+        workdir = self._resolve(cwd) if cwd else self.settings.project_dir
         try:
             proc = subprocess.run(
                 command,
                 shell=True,
-                cwd=str(self.settings.project_dir),
+                cwd=str(workdir),
                 capture_output=True,
                 timeout=timeout,
             )
@@ -158,11 +186,11 @@ class ToolKit:
         """
         res = self.permission_manager.check_permission(command)
         if res == PermissionResult.NEEDS_APPROVAL:
-            decision = self.approval_handler.request_approval(command)
+            decision = self.approval_handler.request_approval(command, self._approval_context())
             if decision == ApprovalDecision.ALWAYS_ALLOW:
                 self.permission_manager.add_always_allow(command)
             elif decision == ApprovalDecision.DENY:
-                return "ERROR: Command execution denied by user."
+                return self._denied_message()
 
         def on_finished(tid, code):
             agent = getattr(self, "agent_instance", None)

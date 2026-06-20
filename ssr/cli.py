@@ -346,6 +346,71 @@ def cmd_serve(args, settings: Settings, console: Console) -> int:
     return 0
 
 
+def _run_turn_with_controls(agent, line: str, console: Console) -> str:
+    """Run a main agent turn while accepting ``/stop`` and ``/btw`` concurrently.
+
+    The turn runs on a worker thread; the main thread polls stdin (non-blocking
+    on POSIX) so the user can interrupt the task (``/stop``) or ask a side
+    question that the agent answers in parallel (``/btw <question>``) without
+    racing the main turn's state.
+    """
+    import select
+    import sys
+    import threading
+
+    holder: dict = {}
+
+    def worker() -> None:
+        try:
+            holder["reply"] = agent.run(line)
+        except Exception as e:  # pragma: no cover - defensive
+            holder["reply"] = f"[agent error] {e}"
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+    can_poll = hasattr(select, "select") and sys.stdin is not None and sys.stdin.isatty()
+    while t.is_alive():
+        ctrl = None
+        if can_poll:
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+            except Exception:
+                can_poll = False
+                ready = []
+            if ready:
+                ctrl = sys.stdin.readline().strip()
+        else:
+            t.join(timeout=0.2)
+            continue
+        if not ctrl:
+            continue
+        low = ctrl.lower()
+        if low in ("/stop", "/cancel"):
+            if agent.request_stop():
+                console.print("[yellow]⏹ stop requested — finishing the current step…[/yellow]")
+            else:
+                console.print("[dim]Nothing is running.[/dim]")
+        elif low == "/btw" or low.startswith("/btw "):
+            question = ctrl[4:].strip()
+            if not question:
+                console.print("[yellow]Usage: /btw <question>[/yellow]")
+                continue
+
+            def side(q: str = question) -> None:
+                ans = agent.answer_side_question(q)
+                console.print(f"\n[bold cyan]btw ▸[/bold cyan] {ans}\n")
+
+            threading.Thread(target=side, daemon=True).start()
+            console.print("[dim cyan]↳ answering your side question…[/dim cyan]")
+        else:
+            console.print(
+                "[dim](busy — use /stop to interrupt or /btw <question> to ask alongside)[/dim]"
+            )
+    t.join()
+    return holder.get("reply", "")
+
+
 def repl(settings: Settings, console: Console, turbo_mode: bool = False) -> int:
     from .agent.core import SSRAgent
     from .slash import handle as handle_slash
@@ -389,8 +454,11 @@ def repl(settings: Settings, console: Console, turbo_mode: bool = False) -> int:
         if "GEMINI_API_KEY" in missing_required(settings):
             console.print("[red]GEMINI_API_KEY not set — edit ~/.ssr/.env[/red]")
             continue
-        console.print("[dim magenta]thinking…[/dim magenta]")
-        reply = agent.run(line)
+        console.print(
+            "[dim magenta]thinking…[/dim magenta] "
+            "[dim](type /stop to interrupt, or /btw <question> to ask alongside)[/dim]"
+        )
+        reply = _run_turn_with_controls(agent, line, console)
         console.print(f"\n[bold green]ssr ▸[/bold green] {reply}\n")
 
 

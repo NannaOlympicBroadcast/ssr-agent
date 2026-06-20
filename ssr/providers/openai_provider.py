@@ -106,6 +106,8 @@ class OpenAIProvider(AbstractProvider):
                 })
 
         for _ in range(max_iters):
+            if self.agent_instance is not None and self.agent_instance.should_stop(tag):
+                return "⏹ Task stopped by user (/stop)."
             # Translate Gemini contents to OpenAI messages
             messages = []
             if system_instruction:

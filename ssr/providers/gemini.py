@@ -40,6 +40,10 @@ class GeminiProvider(AbstractProvider):
         )
 
         for _ in range(max_iters):
+            # Cooperative interruption (/stop): abort at the iteration boundary so
+            # any in-flight tool call has already completed cleanly.
+            if self.agent_instance is not None and self.agent_instance.should_stop(tag):
+                return "⏹ Task stopped by user (/stop)."
             resp = self.client.models.generate_content(
                 model=self.model_name, contents=contents, config=config
             )

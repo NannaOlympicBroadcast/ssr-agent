@@ -1,12 +1,46 @@
-"""IM-specific slash command handler."""
+"""IM-specific slash command handler.
+
+Slash commands in IM/channel mode are kept *in sync* with the command-line
+(REPL) mode: anything the CLI ``/`` handler understands is available here too.
+A handful of commands need IM-specific behaviour (asynchronous execution,
+out-of-band approvals, interruption), so those are special-cased; everything
+else is delegated to :func:`ssr.slash.handle` with a recording console whose
+output is sent back to the user as a chat reply.
+"""
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
+import io
+import threading
+
 from ssr.agent.core import SSRAgent
-from ssr.config import Settings
 from ssr.approval import get_active_approval, ApprovalDecision
+from ssr.config import Settings
+
+# Commands that must run with IM-specific semantics rather than the synchronous
+# CLI handler (they either block for a long time or coordinate with a running
+# turn / pending approval).
+_IM_SPECIAL = {
+    "/approve", "/alwaysallow", "/disallow",
+    "/stop", "/cancel", "/btw", "/goal",
+}
+
+
+def _delegate_to_cli(command_str: str, agent: SSRAgent, settings: Settings, reply) -> None:
+    """Run a CLI slash command and forward its rendered output to the chat."""
+    from rich.console import Console
+    from ssr.slash import handle as cli_handle
+
+    buf = io.StringIO()
+    rec = Console(file=buf, width=100, no_color=True, highlight=False, emoji=False)
+    try:
+        cli_handle(command_str, agent, settings, rec)
+    except Exception as e:  # never let a command crash the channel loop
+        reply(f"Command error: {e}")
+        return
+    out = buf.getvalue().strip()
+    reply(out or "(done)")
+
 
 def handle_slash_im(
     command_str: str,
@@ -16,118 +50,79 @@ def handle_slash_im(
     send_reply_fn,
 ) -> bool:
     """Handle a slash command in an IM context.
-    
+
     Returns True if it was handled as a slash command, False otherwise.
     """
     parts = command_str.strip().split()
     if not parts or not parts[0].startswith("/"):
         return False
-        
+
     cmd = parts[0].lower()
     args = parts[1:]
-    
+
     def reply(msg: str) -> None:
         send_reply_fn(target, msg)
 
-    if cmd == "/project":
-        if not args:
-            reply(f"Current project directory: `{agent.settings.project_dir}`")
+    # --- interruption: stop the running main turn ------------------------
+    if cmd in ("/stop", "/cancel"):
+        if agent.request_stop():
+            reply("⏹ Stop requested — the running task will halt shortly.")
         else:
-            path_str = " ".join(args)
-            p = Path(path_str).expanduser().resolve()
-            agent.settings.project_dir = p
-            agent.toolkit.settings.project_dir = p
-            reply(f"Switched project directory to: `{p}`")
-            
-    elif cmd == "/session":
+            reply("Nothing is running.")
+
+    # --- side question answered alongside a running main turn ------------
+    elif cmd == "/btw":
         if not args:
-            reply("Usage: /session <list|resume <id>|new>")
-        elif args[0] == "list":
-            sessions = agent.sessions.list()
-            if not sessions:
-                reply("No recorded sessions yet.")
-            else:
-                lines = ["Recorded sessions:"]
-                for s in sessions[:20]:
-                    marker = " ●" if s.get("id") == agent.session_id else ""
-                    lines.append(f"- `{s.get('id')}`: {s.get('title') or '(untitled)'}{marker}")
-                reply("\n".join(lines))
-        elif args[0] == "resume" and len(args) > 1:
-            sid = args[1]
-            if agent.load_session(sid):
-                reply(f"Resumed session `{sid}`.")
-            else:
-                reply(f"Session `{sid}` not found.")
-        elif args[0] == "new":
-            sid = agent.new_session()
-            reply(f"Started new session `{sid}`.")
+            reply("Usage: /btw <question>")
         else:
-            reply("Usage: /session <list|resume <id>|new>")
-            
-    elif cmd == "/model":
-        if not args:
-            primary = agent.models_config.get_primary()
-            reply(f"Current model: `{primary.id}` ({primary.provider}/{primary.model})")
-        elif args[0] == "list":
-            primary = agent.models_config.get_primary()
-            lines = ["Configured models:"]
-            for m in agent.models_config.list_models():
-                status = "primary" if m.id == primary.id else "fallback"
-                lines.append(f"- `{m.id}` ({m.provider}/{m.model}) [{status}]")
-            reply("\n".join(lines))
-        elif args[0] == "switch" and len(args) > 1:
-            target_id = args[1]
-            if agent.models_config.switch_primary(target_id):
-                reply(f"Switched primary model to: `{target_id}`")
-            else:
-                reply(f"Model `{target_id}` not found.")
-        else:
-            reply("Usage: /model [list|switch <id>]")
-            
-    elif cmd == "/bypass-permissions":
-        pm = agent.toolkit.permission_manager
-        pm.turbo_mode = not pm.turbo_mode
-        reply(f"Turbo mode (bypass permissions): `{pm.turbo_mode}`")
-        
+            question = " ".join(args)
+
+            def run_btw() -> None:
+                try:
+                    reply(f"💬 {agent.answer_side_question(question)}")
+                except Exception as e:
+                    reply(f"btw failed: {e}")
+
+            threading.Thread(target=run_btw, daemon=True).start()
+
+    # --- out-of-band command approval ------------------------------------
     elif cmd in ("/approve", "/alwaysallow", "/disallow"):
         approval = get_active_approval()
         if not approval:
             reply("No pending command requires approval.")
-        else:
-            if cmd == "/approve":
-                approval.decision = ApprovalDecision.ALLOW_ONCE
-                approval.event.set()
-                reply("Command approved (once).")
-            elif cmd == "/alwaysallow":
-                approval.decision = ApprovalDecision.ALWAYS_ALLOW
-                approval.event.set()
-                reply("Command pattern always allowed.")
-            elif cmd == "/disallow":
-                reason = " ".join(args) if args else "Denied by user"
-                approval.decision = ApprovalDecision.DENY
-                approval.reason = reason
-                approval.event.set()
-                reply(f"Command disallowed: {reason}")
-                
+        elif cmd == "/approve":
+            approval.decision = ApprovalDecision.ALLOW_ONCE
+            approval.event.set()
+            reply("Command approved (once).")
+        elif cmd == "/alwaysallow":
+            approval.decision = ApprovalDecision.ALWAYS_ALLOW
+            approval.event.set()
+            reply("Command pattern always allowed.")
+        else:  # /disallow [reason]
+            reason = " ".join(args) if args else "Denied by user"
+            approval.decision = ApprovalDecision.DENY
+            approval.reason = reason
+            approval.event.set()
+            reply(f"Command disallowed: {reason}")
+
+    # --- long-running goal loop (kept asynchronous) ----------------------
     elif cmd == "/goal":
         if not args:
             reply("Usage: /goal <goal description>")
         else:
             desc = " ".join(args)
-            if hasattr(agent, "run_goal"):
-                def run_goal_thread():
-                    try:
-                        reply(f"Starting goal: {desc}")
-                        res = agent.run_goal(desc)
-                        reply(f"Goal complete: {res}")
-                    except Exception as e:
-                        reply(f"Goal failed: {e}")
-                import threading
-                threading.Thread(target=run_goal_thread, daemon=True).start()
-            else:
-                reply("Goal mechanism is not loaded yet in this agent version.")
-            
+
+            def run_goal_thread() -> None:
+                try:
+                    reply(f"Starting goal: {desc}")
+                    reply(f"Goal complete: {agent.run_goal(desc)}")
+                except Exception as e:
+                    reply(f"Goal failed: {e}")
+
+            threading.Thread(target=run_goal_thread, daemon=True).start()
+
+    # --- everything else: identical to the CLI command-line mode ---------
     else:
-        reply(f"Unknown slash command: {cmd}")
-        
+        _delegate_to_cli(command_str, agent, settings, reply)
+
     return True
