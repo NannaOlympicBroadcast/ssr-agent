@@ -518,6 +518,93 @@ def cmd_models(args, settings: Settings, console: Console) -> int:
     return 0
 
 
+def cmd_bus(args, settings: Settings, console: Console) -> int:
+    """Run / interact with the SSR event bus."""
+    action = args.bus_action
+
+    if action == "serve":
+        from .bus.server import run_server as run_bus_server
+
+        console.print(f"[cyan]Starting SSR bus server on ws://{args.host}:{args.port}[/cyan]")
+        try:
+            run_bus_server(host=args.host, port=args.port)
+        except Exception as e:
+            console.print(f"[red]Bus server error: {e}[/red]")
+            return 1
+        return 0
+
+    url = getattr(args, "url", None) or settings.bus_url or "ws://127.0.0.1:8765"
+    from .bus import BusClient
+
+    if action == "send":
+        import json
+
+        try:
+            payload = json.loads(args.payload) if args.payload else {}
+        except json.JSONDecodeError as e:
+            console.print(f"[red]Invalid JSON payload: {e}[/red]")
+            return 1
+        client = BusClient(url, source="ssr-cli")
+        try:
+            client.connect()
+            event = client.publish(args.topic, payload if isinstance(payload, dict) else {"value": payload})
+            console.print(f"[green]Published[/green] {event.get('id', '')} on '{args.topic}'.")
+        except Exception as e:
+            console.print(f"[red]Could not send: {e}[/red]")
+            return 1
+        finally:
+            client.close()
+        return 0
+
+    if action == "listen":
+        client = BusClient(url, source="ssr-cli")
+        seen = {"n": 0}
+        import threading
+
+        stop = threading.Event()
+
+        def _on(ev):
+            console.print(f"[cyan]●[/cyan] [bold]{ev.topic}[/bold] [dim]({ev.source})[/dim] {ev.payload}")
+            seen["n"] += 1
+            if args.count and seen["n"] >= args.count:
+                stop.set()
+
+        try:
+            client.connect()
+            client.subscribe(args.pattern, _on)
+            console.print(f"[dim]Listening on '{args.pattern}' at {url} (Ctrl-C to stop)…[/dim]")
+            stop.wait()
+        except KeyboardInterrupt:
+            pass
+        except Exception as e:
+            console.print(f"[red]Could not listen: {e}[/red]")
+            return 1
+        finally:
+            client.close()
+        return 0
+
+    if action == "status":
+        client = BusClient(url, source="ssr-cli")
+        try:
+            client.connect()
+            info = client.ping()
+            console.print(f"[green]Bus online[/green] at {url}: {info.get('peers', 0)} peer(s).")
+            events = client.history("**", 10)
+            if events:
+                console.print("[dim]Recent events:[/dim]")
+                for e in events:
+                    console.print(f"  - {e.topic} ({e.source})")
+        except Exception as e:
+            console.print(f"[red]Bus unreachable at {url}: {e}[/red]")
+            return 1
+        finally:
+            client.close()
+        return 0
+
+    console.print("[yellow]Usage: ssr bus <serve|send|listen|status>[/yellow]")
+    return 1
+
+
 def cmd_serve(args, settings: Settings, console: Console) -> int:
     from .models import ModelsConfig
     cfg = ModelsConfig(settings)
@@ -831,6 +918,22 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host to bind the server to")
     serve.add_argument("--port", type=int, default=8000, help="port to bind the server to")
 
+    bus = sub.add_parser("bus", help="run / talk to the async event bus (JSON-RPC over WebSocket)")
+    bsub = bus.add_subparsers(dest="bus_action", required=True)
+    bserve = bsub.add_parser("serve", help="run a remote bus server")
+    bserve.add_argument("--host", default="127.0.0.1", help="host to bind")
+    bserve.add_argument("--port", type=int, default=8765, help="port to bind")
+    bsend = bsub.add_parser("send", help="publish an event to a bus server")
+    bsend.add_argument("topic")
+    bsend.add_argument("payload", nargs="?", default="", help="JSON object payload")
+    bsend.add_argument("--url", help="bus server URL (default: $SSR_BUS_URL or ws://127.0.0.1:8765)")
+    blisten = bsub.add_parser("listen", help="subscribe and print matching events")
+    blisten.add_argument("pattern", nargs="?", default="**", help="topic pattern, e.g. 'task.*'")
+    blisten.add_argument("--url", help="bus server URL")
+    blisten.add_argument("--count", type=int, default=0, help="exit after N events (0 = forever)")
+    bstatus = bsub.add_parser("status", help="ping a bus server and show recent events")
+    bstatus.add_argument("--url", help="bus server URL")
+
     gw = sub.add_parser("gateway", help="install a channel-bound SSR instance as a system service")
     gwsub = gw.add_subparsers(dest="gateway_action", required=True)
     gwi = gwsub.add_parser("install", help="install (and start) a gateway as a system service")
@@ -900,6 +1003,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_models(args, settings, console)
     if args.command == "serve":
         return cmd_serve(args, settings, console)
+    if args.command == "bus":
+        return cmd_bus(args, settings, console)
     if args.command == "gateway":
         return cmd_gateway(args, settings, console)
 

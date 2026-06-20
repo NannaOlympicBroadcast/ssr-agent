@@ -23,6 +23,7 @@ HELP = {
     "/model": "Manage models: /model [list|switch <id>]",
     "/session": "Manage sessions: /session <list|resume <id>|new>",
     "/goal": "Run until a goal is satisfied: /goal <goal description>",
+    "/bus": "Event bus: /bus <send|listen|wait|ls|history|connect|status> …",
     "/bypass-permissions": "Bypass command approval (toggle turbo mode)",
     "/stop": "Interrupt the running task (also typeable while the agent runs)",
     "/btw": "Ask a side question while the main task keeps running: /btw <question>",
@@ -134,6 +135,9 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
                 return _run_turn_with_controls(agent, prompt, console)
             console.print(agent.run_goal(goal, turn_runner=turn_runner))
 
+    elif cmd == "/bus":
+        _handle_bus(args, agent, console)
+
     elif cmd == "/model":
         if not args:
             primary = agent.models_config.get_primary()
@@ -214,6 +218,87 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
         console.print(f"[red]Unknown command:[/red] {cmd}. Try /help")
 
     return True
+
+
+def _handle_bus(args: list[str], agent: SSRAgent, console: Console) -> None:
+    """`/bus <send|listen|wait|ls|history|connect|status>` — drive the event bus."""
+    import json
+
+    bus = getattr(agent, "bus", None)
+    if bus is None:
+        console.print("[red]Bus is not available.[/red]")
+        return
+    sub = args[0].lower() if args else "ls"
+    rest = args[1:]
+
+    if sub == "send":
+        if not rest:
+            console.print("[yellow]Usage: /bus send <topic> [json-payload][/yellow]")
+            return
+        topic = rest[0]
+        payload = {}
+        if len(rest) > 1:
+            try:
+                payload = json.loads(" ".join(rest[1:]))
+            except json.JSONDecodeError as e:
+                console.print(f"[red]Invalid JSON payload: {e}[/red]")
+                return
+        event = bus.publish(topic, payload if isinstance(payload, dict) else {"value": payload})
+        console.print(f"[green]Published[/green] {event.id} on '{topic}'.")
+
+    elif sub == "listen":
+        if not rest:
+            console.print("[yellow]Usage: /bus listen <pattern>[/yellow]")
+            return
+        listener_id = agent.subscribe_and_notify(rest[0], description="/bus listen")
+        console.print(
+            f"[green]Listening[/green] on '{rest[0]}' (listener {listener_id}). "
+            "Matching events will wake the agent."
+        )
+
+    elif sub == "wait":
+        if not rest:
+            console.print("[yellow]Usage: /bus wait <pattern> [timeout-seconds][/yellow]")
+            return
+        timeout = float(rest[1]) if len(rest) > 1 else 30.0
+        console.print(f"[dim]Waiting up to {timeout}s for '{rest[0]}'…[/dim]")
+        event = bus.wait_for(rest[0], timeout=timeout)
+        if event is None:
+            console.print("[yellow]Timed out — no matching event.[/yellow]")
+        else:
+            console.print(f"[cyan]Received[/cyan] {event.topic}: {event.payload}")
+
+    elif sub in ("ls", "listeners"):
+        listeners = bus.listeners()
+        if not listeners:
+            console.print("[dim]No active bus listeners.[/dim]")
+        for ls in listeners:
+            console.print(f"  [cyan]{ls['id']}[/cyan]  pattern='{ls['pattern']}'  {ls.get('description', '')}")
+
+    elif sub == "history":
+        pattern = rest[0] if rest else "**"
+        for e in bus.history(pattern, 20):
+            console.print(f"  - [bold]{e.topic}[/bold] [dim]({e.source})[/dim] {e.payload}")
+
+    elif sub == "connect":
+        if not rest:
+            console.print("[yellow]Usage: /bus connect <ws://host:port>[/yellow]")
+            return
+        try:
+            console.print("[green]" + agent.connect_bus(rest[0]) + "[/green]")
+        except Exception as e:
+            console.print(f"[red]Could not connect: {e}[/red]")
+
+    elif sub == "status":
+        bridged = getattr(agent, "_bus_bridge", None) is not None
+        url = getattr(agent.settings, "bus_url", None) or "—"
+        console.print(
+            f"Bus [bold cyan]{bus.name}[/bold cyan]: "
+            f"{len(bus.listeners())} listener(s), bridged={bridged}, remote={url}"
+        )
+
+    else:
+        console.print("[yellow]Usage: /bus <send|listen|wait|ls|history|connect|status>[/yellow]")
 
 
 def _handle_attach(cmd: str, args: list[str], agent: SSRAgent, console: Console) -> None:

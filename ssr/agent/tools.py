@@ -376,6 +376,118 @@ class ToolKit:
             return "ERROR: sub-agent runner not available"
         return self._sub_agent_runner(task, context)
 
+    # ----------------------------------------------------------------- bus
+    def _bus(self):
+        """Return the running agent's built-in MessageBus, or None."""
+        agent = getattr(self, "agent_instance", None)
+        return getattr(agent, "bus", None) if agent is not None else None
+
+    def bus_publish(self, topic: str, payload_json: str = "", source: str = "") -> str:
+        """Publish a structured event onto the bus to communicate asynchronously.
+
+        Events propagate to local listeners and, if the bus is bridged, to the
+        remote bus server (and from there to other agents/programs).
+
+        Args:
+            topic: Dotted topic name, e.g. 'task.completed' or 'agent.alice.ping'.
+            payload_json: Optional JSON object string carried with the event.
+            source: Optional override for the event source label.
+        """
+        import json
+
+        bus = self._bus()
+        if bus is None:
+            return "ERROR: bus not available in this context"
+        try:
+            payload = json.loads(payload_json) if payload_json.strip() else {}
+            if not isinstance(payload, dict):
+                payload = {"value": payload}
+        except json.JSONDecodeError as e:
+            return f"ERROR: payload_json is not valid JSON: {e}"
+        event = bus.publish(topic, payload, source=source or None)
+        return f"Published event {event.id} on '{topic}'."
+
+    def bus_subscribe(self, pattern: str, description: str = "") -> str:
+        """Create a bus listener that wakes the agent when a matching event fires.
+
+        Use this to be *triggered by* bus events: when an event whose topic
+        matches `pattern` is published, a new agent turn starts describing it so
+        you can react. Patterns support wildcards: '*' (one segment) and '**'
+        (the rest), e.g. 'task.*' or 'agent.**'.
+
+        Args:
+            pattern: Topic pattern to listen for.
+            description: Optional human-readable note for this listener.
+        """
+        agent = getattr(self, "agent_instance", None)
+        if agent is None or not hasattr(agent, "subscribe_and_notify"):
+            return "ERROR: bus not available in this context"
+        listener_id = agent.subscribe_and_notify(pattern, description=description)
+        return f"Listening on '{pattern}' (listener {listener_id}). Matching events will wake the agent."
+
+    def bus_wait(self, pattern: str, timeout: float = 60.0) -> str:
+        """Suspend the current session until a matching bus event arrives.
+
+        Blocks this turn until an event whose topic matches `pattern` is
+        published (locally or via the remote server), or until `timeout` seconds
+        elapse. Returns the event as JSON, or a timeout notice.
+
+        Args:
+            pattern: Topic pattern to wait for (supports '*' and '**' wildcards).
+            timeout: Maximum seconds to wait before giving up.
+        """
+        import json
+
+        bus = self._bus()
+        if bus is None:
+            return "ERROR: bus not available in this context"
+        event = bus.wait_for(pattern, timeout=timeout if timeout and timeout > 0 else None)
+        if event is None:
+            return f"TIMEOUT: no event matching '{pattern}' within {timeout}s."
+        return "Received event:\n" + json.dumps(event.to_dict(), ensure_ascii=False, indent=2)
+
+    def bus_unsubscribe(self, listener_id: str) -> str:
+        """Remove a bus listener created by bus_subscribe.
+
+        Args:
+            listener_id: The id returned when the listener was created.
+        """
+        bus = self._bus()
+        if bus is None:
+            return "ERROR: bus not available in this context"
+        agent = getattr(self, "agent_instance", None)
+        if agent is not None:
+            getattr(agent, "_bus_notify_listeners", {}).pop(listener_id, None)
+        return "Removed listener." if bus.unsubscribe(listener_id) else "No such listener."
+
+    def bus_listeners(self) -> str:
+        """List the active bus listeners on this agent's bus."""
+        bus = self._bus()
+        if bus is None:
+            return "ERROR: bus not available in this context"
+        listeners = bus.listeners()
+        if not listeners:
+            return "(no active bus listeners)"
+        return "\n".join(
+            f"- {ls['id']}  pattern='{ls['pattern']}'  {ls.get('description', '')}".rstrip()
+            for ls in listeners
+        )
+
+    def bus_history(self, pattern: str = "**", limit: int = 10) -> str:
+        """Show recent events seen on the bus (most recent last).
+
+        Args:
+            pattern: Topic pattern to filter by (defaults to everything).
+            limit: Maximum number of events to return.
+        """
+        bus = self._bus()
+        if bus is None:
+            return "ERROR: bus not available in this context"
+        events = bus.history(pattern, limit)
+        if not events:
+            return "(no events in bus history)"
+        return "\n".join(f"- {e.topic} ({e.source}): {e.payload}" for e in events)
+
     def reindex_context(self, category: str = "all") -> str:
         """Rebuild the model2vec embedding index for the context pool.
 
@@ -407,6 +519,12 @@ class ToolKit:
             self.reindex_context,
             self.push_notification,
             self.send_file_to_user,
+            self.bus_publish,
+            self.bus_subscribe,
+            self.bus_wait,
+            self.bus_unsubscribe,
+            self.bus_listeners,
+            self.bus_history,
         ]
 
     def specs(self) -> list[dict]:

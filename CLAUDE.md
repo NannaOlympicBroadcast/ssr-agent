@@ -22,6 +22,17 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr/skills/` — skill discovery across `~/.agent`, `~/.codex`, `~/.gemini`,
   `~/.claude`, `~/.ssr` + built-in skill installer (bundled skills in
   `ssr/builtin_skills/`, incl. `review-mode`).
+- `ssr/bus/` — the **event bus**: asynchronous, structured (JSON-RPC 2.0)
+  pub/sub for managing agents and tasks. `core.MessageBus` is the in-process bus
+  every running `SSRAgent` owns (topic wildcards `*`/`**`, listeners, `wait_for`
+  to suspend a session until an event arrives, de-dup by event id).
+  `server.BusServer` (`ssr bus serve`) brokers events between peers over
+  WebSocket; `client.BusClient` is the synchronous programmatic client for
+  external programs / other agents, and `client.RemoteBusBridge` bridges an
+  agent's built-in bus to a remote server (set `SSR_BUS_URL`). Agent tools:
+  `bus_publish`, `bus_subscribe` (wakes the agent on matching events),
+  `bus_wait`, `bus_unsubscribe`, `bus_listeners`, `bus_history`; REPL `/bus`,
+  CLI `ssr bus <serve|send|listen|status>`.
 - `ssr/plugins.py` + `ssr/builtin_plugins/` — bundled *plugins* (Claude-Code
   `.claude-plugin/plugin.json` + `.mcp.json` format) that contribute MCP servers,
   merged with `~/.ssr/mcp.json`. Ships `chrome-devtools`; supports shared
@@ -53,6 +64,8 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr task create <name> "<prompt>" --cron "*/30 * * * *"` — pm2 task
 - `ssr feishu configure` — set up the Lark bot
 - `ssr channel config xiaomi` / `ssr channel on xiaomi` — XiaoAI speaker channel
+- `ssr bus serve` — run a remote bus server; `ssr bus send <topic> '<json>'` /
+  `ssr bus listen '<pattern>'` / `ssr bus status` — talk to it from the CLI
 - While the agent runs: `/stop` interrupts the task; `/btw <q>` answers a side
   question concurrently (isolated toolkit, no races). On an approval prompt,
   `/disallow <reason>` (or a typed reason in the TUI) is fed back to the model.
