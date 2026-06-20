@@ -282,36 +282,363 @@ class MCPServer:
             raise MCPError(f"MCP '{self.name}' {method} error: {err.get('message', err)}")
         return slot.get("result", {})
 
+class MCPSSEServer:
+    """Manages one MCP server connection over SSE + HTTP transport."""
+
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        headers: Optional[dict[str, str]] = None,
+        query_params: Optional[dict[str, str]] = None,
+        timeout: float = _DEFAULT_TIMEOUT,
+    ):
+        self.name = name
+        self.url = url
+        self.headers = headers or {}
+        self.query_params = query_params or {}
+        self.timeout = timeout
+
+        self._client: Optional[Any] = None
+        self._reader: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._next_id = 0
+        self._pending: dict[int, dict] = {}     # id -> {"event", "result", "error"}
+        self._tools: list[MCPTool] = []
+        self._started = False
+        self._closed = False
+        self._post_url: Optional[str] = None
+        self._endpoint_ready = threading.Event()
+
+    def start(self) -> list[MCPTool]:
+        """Establish SSE connection, handshake and list tools. Returns the tools."""
+        if self._started:
+            return self._tools
+
+        import httpx
+        self._client = httpx.Client(headers=self.headers, timeout=self.timeout)
+
+        self._reader = threading.Thread(
+            target=self._read_loop, name=f"mcp-sse-{self.name}", daemon=True
+        )
+        self._reader.start()
+
+        # Wait for endpoint advertisement from the server.
+        if not self._endpoint_ready.wait(timeout=self.timeout):
+            self.stop()
+            raise MCPError(f"MCP SSE server '{self.name}' timed out waiting for endpoint advertisement")
+
+        # Handshake
+        self._request(
+            "initialize",
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "ssr-agent", "version": "0.1.0"},
+            },
+        )
+        self._notify("notifications/initialized")
+
+        # Enumerate tools
+        result = self._request("tools/list", {})
+        self._tools = [
+            MCPTool(
+                server=self.name,
+                name=t.get("name", ""),
+                description=t.get("description", "") or "",
+                input_schema=t.get("inputSchema") or t.get("input_schema") or {"type": "object"},
+            )
+            for t in (result.get("tools") or [])
+            if t.get("name")
+        ]
+        self._started = True
+        return self._tools
+
+    @property
+    def tools(self) -> list[MCPTool]:
+        return list(self._tools)
+
+    def call(self, tool: str, arguments: Optional[dict] = None) -> str:
+        """Invoke ``tool`` and return its result content flattened to text."""
+        if not self._started:
+            raise MCPError(f"MCP server '{self.name}' is not running")
+        result = self._request("tools/call", {"name": tool, "arguments": arguments or {}})
+        return _flatten_content(result)
+
+    def stop(self) -> None:
+        """Close HTTP clients and connection."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+
+        # Fail any in-flight requests so callers don't hang.
+        with self._lock:
+            for slot in self._pending.values():
+                slot.setdefault("error", {"message": "MCP server stopped"})
+                slot["event"].set()
+            self._pending.clear()
+
+    def _read_loop(self) -> None:
+        import urllib.parse
+        try:
+            with self._client.stream("GET", self.url, params=self.query_params, timeout=None) as response:
+                if response.status_code != 200:
+                    _LOGGER.error("mcp-sse[%s] connection failed with status code %s", self.name, response.status_code)
+                    self._endpoint_ready.set()
+                    return
+
+                current_event = None
+                current_data_lines = []
+
+                for line in response.iter_lines():
+                    if self._closed:
+                        break
+                    line = line.strip()
+                    if not line:
+                        if current_event or current_data_lines:
+                            data = "\n".join(current_data_lines)
+                            self._handle_sse_event(current_event, data)
+                            current_event = None
+                            current_data_lines = []
+                        continue
+
+                    if line.startswith(":"):
+                        continue
+
+                    if ":" in line:
+                        field, value = line.split(":", 1)
+                        field = field.strip()
+                        value = value.strip()
+                        if field == "event":
+                            current_event = value
+                        elif field == "data":
+                            current_data_lines.append(value)
+
+                if current_event or current_data_lines:
+                    data = "\n".join(current_data_lines)
+                    self._handle_sse_event(current_event, data)
+
+        except Exception as e:
+            if not self._closed:
+                _LOGGER.error("mcp-sse[%s] reader loop error: %s", self.name, e)
+        finally:
+            self._endpoint_ready.set()
+            # Fail any in-flight requests so callers don't hang.
+            with self._lock:
+                for slot in self._pending.values():
+                    slot.setdefault("error", {"message": "MCP server connection lost"})
+                    slot["event"].set()
+                self._pending.clear()
+
+    def _handle_sse_event(self, event: Optional[str], data: str) -> None:
+        import urllib.parse
+        if event == "endpoint":
+            self._post_url = urllib.parse.urljoin(self.url, data)
+            self._endpoint_ready.set()
+        elif event == "message" or event is None:
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                _LOGGER.debug("mcp-sse[%s] non-JSON line: %s", self.name, data[:200])
+                return
+            mid = msg.get("id")
+            if mid is None:
+                return  # A notification/request from the server, ignored
+            with self._lock:
+                slot = self._pending.get(mid)
+            if slot is None:
+                return
+            if "error" in msg:
+                slot["error"] = msg["error"]
+            else:
+                slot["result"] = msg.get("result", {})
+            slot["event"].set()
+
+    def _send(self, payload: dict) -> None:
+        if not self._post_url:
+            raise MCPError(f"MCP server '{self.name}' has no post URL")
+        try:
+            r = self._client.post(self._post_url, json=payload)
+            if r.status_code not in (200, 202):
+                raise MCPError(f"POST failed with status {r.status_code}: {r.text}")
+        except Exception as e:
+            raise MCPError(f"failed to write to MCP server '{self.name}': {e}") from e
+
+    def _notify(self, method: str, params: Optional[dict] = None) -> None:
+        self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
+
+    def _request(self, method: str, params: dict) -> dict:
+        with self._lock:
+            self._next_id += 1
+            mid = self._next_id
+            event = threading.Event()
+            self._pending[mid] = {"event": event}
+        try:
+            self._send({"jsonrpc": "2.0", "id": mid, "method": method, "params": params})
+        except Exception:
+            with self._lock:
+                self._pending.pop(mid, None)
+            raise
+        if not event.wait(timeout=self.timeout):
+            with self._lock:
+                self._pending.pop(mid, None)
+            raise MCPError(f"MCP server '{self.name}' timed out on '{method}'")
+        with self._lock:
+            slot = self._pending.pop(mid, {})
+        if "error" in slot:
+            err = slot["error"]
+            raise MCPError(f"MCP '{self.name}' {method} error: {err.get('message', err)}")
+        return slot.get("result", {})
+
 
 class MCPManager:
     """Spawns and routes calls across all MCP servers declared in a config."""
 
-    def __init__(self, servers: Optional[list[MCPServer]] = None):
-        self._servers: dict[str, MCPServer] = {s.name: s for s in (servers or [])}
+    def __init__(self, servers: Optional[list[MCPServer | MCPSSEServer]] = None):
+        self._servers: dict[str, MCPServer | MCPSSEServer] = {s.name: s for s in (servers or [])}
         self._tools: dict[str, MCPTool] = {}  # qualified_name -> tool
         self._started = False
         atexit.register(self.shutdown)
 
     @classmethod
     def from_config(cls, config_path: Path, timeout: float = _DEFAULT_TIMEOUT) -> "MCPManager":
-        servers: list[MCPServer] = []
+        servers: list[MCPServer | MCPSSEServer] = []
         for name, cfg in _read_server_configs(config_path).items():
             if cfg.get("disabled"):
                 continue
-            command = cfg.get("command")
-            if not command:
-                _LOGGER.warning("mcp server '%s' has no 'command'; skipping", name)
-                continue
-            servers.append(
-                MCPServer(
-                    name=name,
-                    command=command,
-                    args=cfg.get("args"),
-                    env=cfg.get("env"),
-                    cwd=cfg.get("cwd"),
-                    timeout=timeout,
+            if "url" in cfg:
+                servers.append(
+                    MCPSSEServer(
+                        name=name,
+                        url=cfg["url"],
+                        headers=cfg.get("headers"),
+                        query_params=cfg.get("query_params"),
+                        timeout=timeout,
+                    )
                 )
-            )
+            elif "command" in cfg:
+                servers.append(
+                    MCPServer(
+                        name=name,
+                        command=cfg["command"],
+                        args=cfg.get("args"),
+                        env=cfg.get("env"),
+                        cwd=cfg.get("cwd"),
+                        timeout=timeout,
+                    )
+                )
+            else:
+                _LOGGER.warning("mcp server '%s' has neither 'command' nor 'url'; skipping", name)
+        return cls(servers)
+
+    @classmethod
+    def from_settings(cls, settings: Any, timeout: float = _DEFAULT_TIMEOUT) -> "MCPManager":
+        servers: list[MCPServer | MCPSSEServer] = []
+        
+        # 1. Load from main mcp.json
+        if hasattr(settings, "mcp_config"):
+            for name, cfg in _read_server_configs(settings.mcp_config).items():
+                if cfg.get("disabled"):
+                    continue
+                if "url" in cfg:
+                    servers.append(
+                        MCPSSEServer(
+                            name=name,
+                            url=cfg["url"],
+                            headers=cfg.get("headers"),
+                            query_params=cfg.get("query_params"),
+                            timeout=timeout,
+                        )
+                    )
+                elif "command" in cfg:
+                    servers.append(
+                        MCPServer(
+                            name=name,
+                            command=cfg["command"],
+                            args=cfg.get("args"),
+                            env=cfg.get("env"),
+                            cwd=cfg.get("cwd"),
+                            timeout=timeout,
+                        )
+                    )
+                else:
+                    _LOGGER.warning("mcp server '%s' has neither 'command' nor 'url'; skipping", name)
+                
+        # 2. Load from plugins
+        plugin_configs = find_plugin_mcp_configs(settings)
+        for plugin_dir, servers_dict in plugin_configs:
+            dirname = str(plugin_dir.resolve()).replace("\\", "/")
+            for name, cfg in servers_dict.items():
+                if cfg.get("disabled"):
+                    continue
+                if "url" in cfg:
+                    servers.append(
+                        MCPSSEServer(
+                            name=name,
+                            url=cfg["url"],
+                            headers=cfg.get("headers"),
+                            query_params=cfg.get("query_params"),
+                            timeout=timeout,
+                        )
+                    )
+                elif "command" in cfg:
+                    # Resolve __dirname in command, args, env, cwd
+                    resolved_command = resolve_dirnames(cfg["command"], dirname)
+                    resolved_args = resolve_dirnames(cfg.get("args"), dirname)
+                    resolved_env = resolve_dirnames(cfg.get("env"), dirname)
+                    resolved_cwd = resolve_dirnames(cfg.get("cwd"), dirname) or dirname
+                    
+                    servers.append(
+                        MCPServer(
+                            name=name,
+                            command=resolved_command,
+                            args=resolved_args,
+                            env=resolved_env,
+                            cwd=resolved_cwd,
+                            timeout=timeout,
+                        )
+                    )
+                else:
+                    _LOGGER.warning("plugin mcp server '%s' has neither 'command' nor 'url'; skipping", name)
+
+        # 3. Load remote dispatch MCP if configured
+        home_path = None
+        if hasattr(settings, "home") and settings.home:
+            home_path = Path(settings.home)
+        else:
+            try:
+                from ..config import ssr_home
+                home_path = ssr_home()
+            except Exception:
+                pass
+        
+        if home_path:
+            remote_json_path = home_path / "remote.json"
+            if remote_json_path.exists():
+                try:
+                    remote_cfg = json.loads(remote_json_path.read_text("utf-8"))
+                    endpoint = remote_cfg.get("endpoint")
+                    token = remote_cfg.get("token")
+                    if endpoint and token:
+                        # Ensure we don't overwrite user-defined "dispatch" in mcp.json
+                        if not any(s.name == "dispatch" for s in servers):
+                            url = f"{endpoint.rstrip('/')}/mcp"
+                            servers.append(
+                                MCPSSEServer(
+                                    name="dispatch",
+                                    url=url,
+                                    query_params={"key": token},
+                                    timeout=timeout,
+                                )
+                            )
+                except Exception as e:
+                    _LOGGER.warning("failed to load remote.json config: %s", e)
+                
         return cls(servers)
 
     def start_all(self) -> list[MCPTool]:
@@ -352,6 +679,7 @@ class MCPManager:
                 pass
 
 
+
 def _read_server_configs(config_path: Path) -> dict[str, dict]:
     if not config_path.exists():
         return {}
@@ -362,6 +690,75 @@ def _read_server_configs(config_path: Path) -> dict[str, dict]:
         return {}
     servers = data.get("mcpServers", data.get("servers", {}))
     return servers if isinstance(servers, dict) else {}
+
+
+def find_plugin_mcp_configs(settings: Any) -> list[tuple[Path, dict]]:
+    """Return a list of (plugin_dir, servers_dict) for all discovered plugins that have MCP configs."""
+    configs = []
+    plugins_dirs = []
+    if hasattr(settings, "plugins_dir"):
+        plugins_dirs.append(settings.plugins_dir)
+    if hasattr(settings, "project_plugins_dir"):
+        plugins_dirs.append(settings.project_plugins_dir)
+        
+    for base in plugins_dirs:
+        if not base.exists():
+            continue
+        try:
+            entries = sorted(base.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            
+            # Check for plugin manifest
+            manifest_path = None
+            for cand in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
+                path = entry / cand
+                if path.exists():
+                    manifest_path = path
+                    break
+            
+            if manifest_path is None:
+                continue
+                
+            servers_dict = {}
+            # 1. Try reading inline mcpServers from plugin.json
+            try:
+                data = json.loads(manifest_path.read_text("utf-8"))
+                servers_dict = data.get("mcpServers", data.get("servers", {}))
+            except Exception:
+                pass
+                
+            # 2. If inline not found or empty, try reading separate .mcp.json or mcp.json
+            if not isinstance(servers_dict, dict) or not servers_dict:
+                for cand in (".mcp.json", "mcp.json"):
+                    mcp_path = entry / cand
+                    if mcp_path.exists():
+                        try:
+                            data = json.loads(mcp_path.read_text("utf-8"))
+                            servers_dict = data.get("mcpServers", data.get("servers", {}))
+                        except Exception:
+                            pass
+                        break
+                        
+            if isinstance(servers_dict, dict) and servers_dict:
+                configs.append((entry, servers_dict))
+                
+    return configs
+
+
+def resolve_dirnames(val: Any, dirname: str) -> Any:
+    if isinstance(val, str):
+        val = val.replace("${__dirname}", dirname).replace("__dirname", dirname)
+        val = val.replace("${CLAUDE_PLUGIN_ROOT}", dirname)
+        return val
+    elif isinstance(val, list):
+        return [resolve_dirnames(item, dirname) for item in val]
+    elif isinstance(val, dict):
+        return {k: resolve_dirnames(v, dirname) for k, v in val.items()}
+    return val
 
 
 def _flatten_content(result: Any) -> str:

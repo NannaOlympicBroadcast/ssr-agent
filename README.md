@@ -76,7 +76,7 @@ ssr task create nightly "summarise today's git log" --cron "0 22 * * *"
 ssr channel config feishu  # configure Feishu channel (alias: configure)
 ssr channel on feishu      # start listening on Feishu channel (alias: serve)
 ssr channel config wechat  # configure WeChat channel (scanning QR code to log in; network-resilient status checks handling wait, scanned, expired, canceled, timeout, and customized error message responses; press Ctrl+C to cancel)
-ssr channel on wechat      # start listening on WeChat channel (with dynamic X-WECHAT-UIN headers, full base_info / client_id payload alignment, incoming image message decryption support, and auto-exit on session timeout)
+ssr channel on wechat      # start listening on WeChat channel (with dynamic X-WECHAT-UIN headers, full base_info / client_id payload alignment, incoming image message decryption support, auto-exit on session timeout, robust media/file send support, and verbose logging for API calls)
 
 # Multi-Model configurations
 ssr models config        # interactively configure LLM models (Gemini, Anthropic, OpenAI)
@@ -171,7 +171,73 @@ When the agent executes a background command via the `spawn_terminal` tool, it i
 - The agent is automatically woken up for a single turn with the terminal exit status.
 - The agent's generated response is pushed back to the corresponding channel (such as Feishu, WeChat, or Remote Control/RC client) from which the command was initiated.
 
+### Hooks Mechanism
+
+Allows executing arbitrary shell commands configured in global `~/.ssr/hooks.json` or project-level `.ssr/hooks.json` on key agent events (`UserPromptSubmit` at the start of a prompt and `Stop` at the end of a reply). The event payload is passed to the command's standard input as a JSON string.
+
+Example `hooks.json` format:
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "command": "python -c \"import sys, json; payload = json.load(sys.stdin); print(f'Prompt: {payload[\"prompt\"]}')\"",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "command": "echo 'Done!'"
+      }
+    ]
+  }
+}
+```
+
+### Plugins Mechanism
+
+Automatically discovers and loads Claude-Code/Codex-style plugins (which have `.claude-plugin/plugin.json` or `.codex-plugin/plugin.json` manifests) from global `~/.ssr/plugins` and project-level `.ssr/plugins` directories.
+
+*   **Skill Integration**: Loaded manifests are registered into the skill context pool under the `ContextCategory.SKILLS` category with metadata `{"kind": "plugin"}`.
+*   **Dynamic MCP Registration**: Plugins can define MCP servers either inline in `plugin.json` (under the `mcpServers` key) or in a separate `.mcp.json` or `mcp.json` file in the plugin's root directory. The agent automatically loads these configurations when initialized.
+*   **Path Resolution**: To support portable installations, path placeholders like `${__dirname}`, `__dirname`, and `${CLAUDE_PLUGIN_ROOT}` in the plugin's MCP server configuration are resolved to the absolute path of the plugin root directory at runtime.
+
+### Built-in Plugins
+
+*   **`miot`**: A built-in Xiaomi Home (MIoT) device control plugin. It is automatically installed into `~/.ssr/plugins/miot` during initialization. It provides comprehensive tools for discovering, querying, and controlling your Xiaomi smart devices (like lights, outlets, sensors, etc.).
+
+### HTTP/SSE MCP and Remote Dispatch
+
+The agent supports two transport types for external Model Context Protocol (MCP) servers:
+- **Stdio Transport**: Spawns a local subprocess and communicates via standard input/output (`command` and `args` in the configuration).
+- **HTTP+SSE Transport**: Connects to a remote MCP server using Server-Sent Events (SSE) for receiving messages and HTTP POST for sending requests (`url` key in the configuration).
+
+#### Configuration Example
+
+In `~/.ssr/mcp.json` or plugin configurations, use `url` instead of `command` to declare an SSE server:
+
+```json
+{
+  "mcpServers": {
+    "my-remote-server": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer my-secret-token"
+      },
+      "query_params": {
+        "version": "1.0"
+      }
+    }
+  }
+}
+```
+
+#### Auto-registered Dispatch Server
+
+If you have configured remote control using `ssr rc` (which stores credentials in `~/.ssr/remote.json`), the agent automatically detects this configuration and registers a default SSE MCP server named `"dispatch"`. Once registered, all tools exposed by the dispatch server (e.g. `list_nodes`, `run_command`, `run_agent`) become immediately available to the agent as `mcp__dispatch__list_nodes`, `mcp__dispatch__run_command`, etc.
+
 ### Session recording
+
 
 Every conversation turn — REPL, one-shot, dispatched agent run, or web chat — is
 recorded as an append-only `~/.ssr/sessions/<id>.jsonl` transcript. List them in

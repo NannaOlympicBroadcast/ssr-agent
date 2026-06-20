@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 from pathlib import Path
 from ssr.config import Settings
 from ssr.channels.base import AbstractChannel
 from ssr.integrations.feishu import FeishuConfig, load_config, save_config, _import_lark, _extract_text, _build_parts
+from ssr.channels.message_parser import parse_and_process_message
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,9 @@ class FeishuChannel(AbstractChannel):
         agent = SSRAgent(settings)
 
         def send_reply(chat_id: str, text: str) -> None:
-            self.send_message(chat_id, text)
+            clean_text = parse_and_process_message(self, chat_id, text)
+            if clean_text:
+                self.send_message(chat_id, clean_text)
 
         def fetch_resource(message_id: str, file_key: str, rtype: str):
             try:
@@ -127,7 +131,7 @@ class FeishuChannel(AbstractChannel):
                 CreateMessageRequestBody.builder()
                 .receive_id(target)
                 .msg_type("text")
-                .content(json.dumps({"text": text}))
+                .content(json.dumps({"text": text}, ensure_ascii=False))
                 .build()
             )
             .build()
@@ -151,20 +155,18 @@ class FeishuChannel(AbstractChannel):
 
         try:
             with open(file_path, "rb") as f:
-                file_bytes = f.read()
-            
-            req = (
-                CreateFileRequest.builder()
-                .request_body(
-                    CreateFileRequestBody.builder()
-                    .file_type("stream")
-                    .file_name(file_path.name)
-                    .file(file_bytes)
+                req = (
+                    CreateFileRequest.builder()
+                    .request_body(
+                        CreateFileRequestBody.builder()
+                        .file_type("stream")
+                        .file_name(file_path.name)
+                        .file(f)
+                        .build()
+                    )
                     .build()
                 )
-                .build()
-            )
-            resp = self.api.im.v1.file.create(req)
+                resp = self.api.im.v1.file.create(req)
             if not resp.success():
                 logger.error(f"[feishu] upload file failed: {resp.code} {resp.msg}")
                 return
@@ -178,7 +180,7 @@ class FeishuChannel(AbstractChannel):
                     CreateMessageRequestBody.builder()
                     .receive_id(target)
                     .msg_type("file")
-                    .content(json.dumps({"file_key": file_key}))
+                    .content(json.dumps({"file_key": file_key}, ensure_ascii=False))
                     .build()
                 )
                 .build()
@@ -196,26 +198,32 @@ class FeishuChannel(AbstractChannel):
             return
             
         try:
+            import io
             if isinstance(path_or_bytes, bytes):
-                img_bytes = path_or_bytes
+                img_file = io.BytesIO(path_or_bytes)
             else:
                 img_path = Path(path_or_bytes)
                 if not img_path.exists():
                     logger.error(f"[feishu] image not found: {path_or_bytes}")
                     return
-                img_bytes = img_path.read_bytes()
+                img_file = open(img_path, "rb")
                 
-            req = (
-                CreateImageRequest.builder()
-                .request_body(
-                    CreateImageRequestBody.builder()
-                    .image_type("message")
-                    .image(img_bytes)
+            try:
+                req = (
+                    CreateImageRequest.builder()
+                    .request_body(
+                        CreateImageRequestBody.builder()
+                        .image_type("message")
+                        .image(img_file)
+                        .build()
+                    )
                     .build()
                 )
-                .build()
-            )
-            resp = self.api.im.v1.image.create(req)
+                resp = self.api.im.v1.image.create(req)
+            finally:
+                if not isinstance(path_or_bytes, bytes):
+                    img_file.close()
+
             if not resp.success():
                 logger.error(f"[feishu] upload image failed: {resp.code} {resp.msg}")
                 return
@@ -229,7 +237,7 @@ class FeishuChannel(AbstractChannel):
                     CreateMessageRequestBody.builder()
                     .receive_id(target)
                     .msg_type("image")
-                    .content(json.dumps({"image_key": image_key}))
+                    .content(json.dumps({"image_key": image_key}, ensure_ascii=False))
                     .build()
                 )
                 .build()

@@ -123,11 +123,45 @@ def load_tools_context(tool_specs: list[dict]) -> list[ContextItem]:
     return items
 
 
+def load_plugins(settings: Settings) -> list[ContextItem]:
+    """Load Claude-Code-style plugin manifests as skill context."""
+    items: list[ContextItem] = []
+    for base in (settings.plugins_dir, settings.project_plugins_dir):
+        if not base.exists():
+            continue
+        for manifest in base.glob("*/.claude-plugin/plugin.json"):
+            text = _read_text(manifest)
+            if text.strip():
+                items.append(
+                    ContextItem(
+                        category=ContextCategory.SKILLS,
+                        title=f"plugin {manifest.parent.parent.name}",
+                        text=text,
+                        source=str(manifest),
+                        metadata={"kind": "plugin"},
+                    )
+                )
+        for manifest in base.glob("*/.codex-plugin/plugin.json"):
+            text = _read_text(manifest)
+            if text.strip():
+                items.append(
+                    ContextItem(
+                        category=ContextCategory.SKILLS,
+                        title=f"plugin {manifest.parent.parent.name}",
+                        text=text,
+                        source=str(manifest),
+                        metadata={"kind": "plugin"},
+                    )
+                )
+    return items
+
+
 def build_pool(settings: Settings, tool_specs: list[dict] | None = None) -> ContextPool:
     """Construct the full context pool from all four categories."""
     pool = ContextPool()
     pool.extend(load_tools_context(tool_specs or []))
     pool.extend(load_configurations(settings))
     pool.extend(load_skills(settings))
+    pool.extend(load_plugins(settings))
     pool.extend(load_memory(settings))
     return pool

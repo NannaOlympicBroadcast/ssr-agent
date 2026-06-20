@@ -18,6 +18,7 @@ from ..rules import load_rules
 from .memory import MemoryStore
 from .sessions import SessionStore
 from .tools import ToolKit
+from ..hooks import run_hooks
 
 SYSTEM_PROMPT = """You are SSR Agent, a meticulous command-line coding agent.
 
@@ -42,13 +43,13 @@ class SSRAgent:
         self.models_config = ModelsConfig(settings)
         # Spawn the MCP servers declared in ~/.ssr/mcp.json and enumerate their
         # tools. Failures are isolated per-server (the agent still runs).
-        self.mcp_manager = _start_mcp_manager(settings.mcp_config)
+        self.mcp_manager = _start_mcp_manager(settings)
         self.mcp_tools = self.mcp_manager.tools
         # Per-tool specs seed the 'tools' context category (so MCP tools are
         # retrievable); fall back to server-level specs if nothing started.
         self.mcp_tool_specs = (
             [_mcp_tool_spec(t) for t in self.mcp_tools]
-            or _load_mcp_specs(settings.mcp_config)
+            or _load_mcp_specs(settings)
         )
         self.retriever = Retriever(settings, tool_specs=None)
         self.memory = MemoryStore(settings)
@@ -129,7 +130,11 @@ class SSRAgent:
         parts.append(
             "\nRULES:\n"
             "1. Always ground responses using web search, project files, tool calls and their results. NEVER fabricate information.\n"
-            "2. If a failure occurs, do NOT fall back to mock or fake implementations. Report the failure to the user and ask them to fix it."
+            "2. If a failure occurs, do NOT fall back to mock or fake implementations. Report the failure to the user and ask them to fix it.\n"
+            "3. For Feishu/WeChat messaging: Use XML tags to carry media. \n"
+            "   - <ssr_reply_image>file_path</ssr_reply_image> for images\n"
+            "   - <ssr_reply_files>file_path</ssr_reply_files> for files\n"
+            "   System will automatically parse, send, and strip these tags from your final text."
         )
         
         # User defined rules from load_rules
@@ -216,6 +221,7 @@ class SSRAgent:
         self.memory.log_turn("user", summary)
         self.ensure_session(summary)
         self._record_turn("user", summary)
+        run_hooks(self.settings, "UserPromptSubmit", {"prompt": summary, "session_id": self.session_id})
 
         gp: list = []
         ctx = self._retrieved_context_text(text_blob) if text_blob else ""
@@ -241,6 +247,7 @@ class SSRAgent:
         self._history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
         self.memory.log_turn("assistant", reply)
         self._record_turn("assistant", reply)
+        run_hooks(self.settings, "Stop", {"reply": reply, "session_id": self.session_id})
         return reply
 
     def _ensure_client(self):
@@ -419,14 +426,14 @@ class SSRAgent:
         )
 
 
-def _start_mcp_manager(mcp_path: Path) -> MCPManager:
-    """Build an :class:`MCPManager` from the config and start its servers.
+def _start_mcp_manager(settings: Settings) -> MCPManager:
+    """Build an :class:`MCPManager` from settings (mcp.json and plugins) and start its servers.
 
     Never raises: if anything goes wrong an empty (no-op) manager is returned so
     the agent keeps working without MCP.
     """
     try:
-        manager = MCPManager.from_config(mcp_path)
+        manager = MCPManager.from_settings(settings)
         manager.start_all()
         return manager
     except Exception:  # pragma: no cover - defensive
@@ -443,21 +450,43 @@ def _mcp_tool_spec(tool: MCPTool) -> dict:
     }
 
 
-def _load_mcp_specs(mcp_path: Path) -> list[dict]:
-    """Read ~/.ssr/mcp.json and return server-level specs for the context pool.
+def _load_mcp_specs(settings: Settings) -> list[dict]:
+    """Read ~/.ssr/mcp.json and plugin MCP configs to return server-level specs for the context pool.
 
     Used as a fallback for the context pool when no MCP server tools could be
     enumerated (e.g. servers disabled or failed to start).
     """
-    if not mcp_path.exists():
-        return []
-    try:
-        data = json.loads(mcp_path.read_text("utf-8"))
-    except Exception:
-        return []
     specs: list[dict] = []
-    servers = data.get("mcpServers", data.get("servers", {}))
-    for name, cfg in servers.items():
-        desc = cfg.get("description", f"MCP server '{name}'")
-        specs.append({"name": f"mcp:{name}", "description": desc, "origin": "mcp"})
+    
+    # 1. Main mcp.json
+    mcp_path = settings.mcp_config
+    if mcp_path.exists():
+        try:
+            data = json.loads(mcp_path.read_text("utf-8"))
+            servers = data.get("mcpServers", data.get("servers", {}))
+            if isinstance(servers, dict):
+                for name, cfg in servers.items():
+                    desc = cfg.get("description", f"MCP server '{name}'")
+                    specs.append({"name": f"mcp:{name}", "description": desc, "origin": "mcp"})
+        except Exception:
+            pass
+            
+    # 2. Plugin MCP configs
+    try:
+        from ..integrations.mcp_client import find_plugin_mcp_configs
+        plugin_configs = find_plugin_mcp_configs(settings)
+        for _, servers_dict in plugin_configs:
+            for name, cfg in servers_dict.items():
+                desc = cfg.get("description", f"MCP server '{name}'")
+                specs.append({"name": f"mcp:{name}", "description": desc, "origin": "mcp"})
+    except Exception:
+        pass
+
+    # 3. Remote dispatch config
+    if hasattr(settings, "home") and settings.home:
+        remote_path = settings.home / "remote.json"
+        if remote_path.exists() and not any(s["name"] == "mcp:dispatch" for s in specs):
+            specs.append({"name": "mcp:dispatch", "description": "Remote dispatch MCP server", "origin": "mcp"})
+        
     return specs
+

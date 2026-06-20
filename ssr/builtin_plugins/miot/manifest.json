@@ -1,0 +1,25 @@
+{
+  "manifest_version": "0.3",
+  "name": "miot-device-mcp",
+  "version": "0.1.15",
+  "author": {
+    "name": "Third-party Developer"
+  },
+  "description": "Third-party Xiaomi Home Device Control MCP Server",
+  "server": {
+    "type": "python",
+    "entry_point": "start_mcp.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--with-requirements",
+        "pyproject.toml",
+        "start_mcp.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname};${__dirname}/miot_kit"
+      }
+    }
+  }
+}
