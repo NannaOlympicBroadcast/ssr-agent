@@ -148,3 +148,73 @@ def test_run_gateway_missing_record_errors(tmp_path):
     settings = _settings(tmp_path)
     with pytest.raises(SystemExit):
         gw.run_gateway(settings, "nope")
+
+
+def test_format_bytes():
+    assert gw.format_bytes(None) == "-"
+    assert gw.format_bytes(512) == "512 B"
+    assert gw.format_bytes(2048) == "2 KB"
+    assert gw.format_bytes(142 * 1024 * 1024) == "142.0 MB"
+    assert gw.format_bytes(3 * 1024 ** 3) == "3.0 GB"
+
+
+def test_rss_from_proc_reads_own_process():
+    import os
+
+    rss = gw._rss_from_proc(os.getpid())
+    # This test only asserts on Linux where /proc exists.
+    if Path("/proc/self/status").exists():
+        assert rss and rss > 0
+    else:
+        assert rss is None
+
+
+def test_systemd_stats_parses_memorycurrent(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+
+    def fake_run(cmd, **kw):
+        import types
+        out = "MainPID=4242\nMemoryCurrent=149123072\nActiveState=active\n"
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    monkeypatch.setattr(gw, "_run", fake_run)
+    st = gw.SystemdManager().stats(settings, "box")
+    assert st["running"] is True
+    assert st["pid"] == 4242
+    assert st["rss"] == 149123072
+    assert "MemoryCurrent" in st["source"]
+
+
+def test_systemd_stats_ignores_sentinel_memory(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+
+    def fake_run(cmd, **kw):
+        import types
+        # 2**64-1 sentinel = "not available"; fall back to /proc (pid absent here).
+        out = "MainPID=0\nMemoryCurrent=18446744073709551615\nActiveState=inactive\n"
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    monkeypatch.setattr(gw, "_run", fake_run)
+    st = gw.SystemdManager().stats(settings, "box")
+    assert st["running"] is False
+    assert st["rss"] is None
+
+
+def test_gather_stats_backfills_via_psutil_when_pid_known(tmp_path, monkeypatch):
+    import os
+
+    settings = _settings(tmp_path)
+    # A manager that knows the PID (this process) but not the RSS.
+    monkeypatch.setattr(
+        gw, "get_manager",
+        lambda: type("M", (gw.ServiceManager,), {
+            "stats": lambda self, s, n: {"running": True, "pid": os.getpid(),
+                                          "rss": None, "threads": None,
+                                          "cpu_percent": None, "source": None},
+        })(),
+    )
+    st = gw.gather_stats(settings, "box")
+    # psutil may or may not be installed; either way it must not crash.
+    pytest.importorskip("psutil")
+    assert st["rss"] and st["rss"] > 0
+    assert st["threads"] and st["threads"] >= 1

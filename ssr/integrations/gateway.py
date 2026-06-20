@@ -164,6 +164,35 @@ def _exec_args(name: str) -> list[str]:
     return [sys.executable, "-m", "ssr", "gateway", "run", name]
 
 
+def format_bytes(n: int | None) -> str:
+    """Human-readable byte size (e.g. ``142.3 MB``); ``-`` for unknown."""
+    if n is None:
+        return "-"
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit in ("B", "KB") else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _rss_from_proc(pid: int) -> int | None:
+    """Read VmRSS (bytes) for *pid* from ``/proc`` (Linux)."""
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text("utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                kb = int(line.split()[1])
+                return kb * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _empty_stats() -> dict:
+    return {"running": False, "pid": None, "rss": None, "threads": None,
+            "cpu_percent": None, "source": None}
+
+
 class ServiceManager:
     backend = "none"
 
@@ -187,6 +216,10 @@ class ServiceManager:
 
     def status(self, settings: Settings, name: str) -> str:  # pragma: no cover
         raise NotImplementedError
+
+    def stats(self, settings: Settings, name: str) -> dict:
+        """Return live resource usage: running / pid / rss(bytes) / source."""
+        return _empty_stats()
 
 
 class _NullManager(ServiceManager):
@@ -295,6 +328,28 @@ class SystemdManager(ServiceManager):
         res = _run(["systemctl", "--user", "is-active", f"{service_id(name)}.service"])
         return (res.stdout or res.stderr).strip() or "unknown"
 
+    def stats(self, settings: Settings, name: str) -> dict:
+        st = _empty_stats()
+        sid = f"{service_id(name)}.service"
+        res = _run(["systemctl", "--user", "show", sid,
+                    "-p", "MainPID", "-p", "MemoryCurrent", "-p", "ActiveState"])
+        props: dict[str, str] = {}
+        for line in res.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k] = v.strip()
+        pid = int(props.get("MainPID", "0") or 0)
+        st["running"] = props.get("ActiveState") == "active" and pid > 0
+        st["pid"] = pid or None
+        mc = props.get("MemoryCurrent", "")
+        if mc.isdigit() and int(mc) < (1 << 63):  # systemd sentinel = 2**64-1
+            st["rss"] = int(mc)
+            st["source"] = "systemd MemoryCurrent (cgroup)"
+        elif pid:
+            st["rss"] = _rss_from_proc(pid)
+            st["source"] = "/proc VmRSS"
+        return st
+
 
 class LaunchdManager(ServiceManager):
     backend = "launchd"
@@ -369,6 +424,29 @@ class LaunchdManager(ServiceManager):
         if res.returncode != 0:
             return "not loaded"
         return "loaded (running)" if '"PID"' in res.stdout else "loaded"
+
+    def stats(self, settings: Settings, name: str) -> dict:
+        st = _empty_stats()
+        res = _run(["launchctl", "list", self._label(name)])
+        if res.returncode != 0:
+            return st
+        pid = None
+        for line in res.stdout.splitlines():
+            s = line.strip()
+            if s.startswith('"PID"') and "=" in s:
+                try:
+                    pid = int(s.split("=", 1)[1].strip().rstrip(";").strip())
+                except ValueError:
+                    pid = None
+        st["pid"] = pid
+        st["running"] = pid is not None
+        if pid:
+            r = _run(["ps", "-o", "rss=", "-p", str(pid)])
+            out = r.stdout.strip()
+            if out.isdigit():
+                st["rss"] = int(out) * 1024  # ps reports KB
+                st["source"] = "ps rss"
+        return st
 
 
 class WindowsTaskManager(ServiceManager):
@@ -465,6 +543,56 @@ class WindowsTaskManager(ServiceManager):
             if line.lower().startswith("status:"):
                 return line.split(":", 1)[1].strip() or "unknown"
         return "installed"
+
+    def stats(self, settings: Settings, name: str) -> dict:
+        st = _empty_stats()
+        # Locate the (pythonw/python) process actually serving this gateway by
+        # matching its command line, then sum its WorkingSetSize (bytes).
+        needle = f"gateway run {name}"
+        script = (
+            "Get-CimInstance Win32_Process -Filter "
+            "\"Name='pythonw.exe' or Name='python.exe'\" | "
+            f"Where-Object {{ $_.CommandLine -like '*{needle}*' }} | "
+            "ForEach-Object {{ \"$($_.ProcessId) $($_.WorkingSetSize)\" }}"
+        )
+        res = _run(["powershell", "-NoProfile", "-Command", script], shell=True)
+        total = 0
+        for line in res.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                if st["pid"] is None:
+                    st["pid"] = int(parts[0])
+                total += int(parts[1])
+        if st["pid"] is not None:
+            st["running"] = True
+            st["rss"] = total
+            st["source"] = "WorkingSetSize"
+        return st
+
+
+def gather_stats(settings: Settings, name: str, with_cpu: bool = False) -> dict:
+    """Normalized live stats for a gateway, enriched with psutil when available.
+
+    Native managers provide running/pid/rss; if ``psutil`` is installed we add
+    thread count (and CPU%% on demand) and backfill rss when the native probe
+    couldn't read it.
+    """
+    st = get_manager().stats(settings, name)
+    pid = st.get("pid")
+    if pid:
+        try:
+            import psutil  # optional dependency
+
+            proc = psutil.Process(pid)
+            if st.get("rss") is None:
+                st["rss"] = proc.memory_info().rss
+                st["source"] = "psutil rss"
+            st["threads"] = proc.num_threads()
+            if with_cpu:
+                st["cpu_percent"] = proc.cpu_percent(interval=0.3)
+        except Exception:
+            pass
+    return st
 
 
 def get_manager() -> ServiceManager:

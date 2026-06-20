@@ -215,6 +215,72 @@ def cmd_channel(args, settings: Settings, console: Console) -> int:
     return 0
 
 
+def _render_stats_table(gw, settings, names: list[str], with_cpu: bool):
+    from rich.table import Table
+
+    mgr = gw.get_manager()
+    table = Table(title=f"SSR Gateway resource usage ({mgr.backend})")
+    table.add_column("Name", style="cyan")
+    table.add_column("Status", style="bold")
+    table.add_column("PID", justify="right", style="dim")
+    table.add_column("Memory (RSS)", justify="right", style="magenta")
+    table.add_column("Threads", justify="right")
+    if with_cpu:
+        table.add_column("CPU %", justify="right", style="yellow")
+    table.add_column("Source", style="dim")
+    for name in names:
+        st = gw.gather_stats(settings, name, with_cpu=with_cpu)
+        running = "[green]running[/green]" if st.get("running") else "[yellow]stopped[/yellow]"
+        row = [
+            name, running,
+            str(st.get("pid") or "-"),
+            gw.format_bytes(st.get("rss")),
+            str(st.get("threads") or "-"),
+        ]
+        if with_cpu:
+            cpu = st.get("cpu_percent")
+            row.append(f"{cpu:.1f}" if cpu is not None else "-")
+        row.append(st.get("source") or "-")
+        table.add_row(*row)
+    return table
+
+
+def _gateway_stats(args, settings: Settings, console: Console) -> int:
+    from .integrations import gateway as gw
+
+    gateways = gw.load_gateways(settings)
+    if args.name:
+        if args.name not in gateways:
+            console.print(f"[red]No gateway named '{args.name}'.[/red]")
+            return 1
+        names = [args.name]
+    else:
+        names = list(gateways)
+    if not names:
+        console.print("[yellow]No gateways installed. Create one with: ssr gateway install <name> --channel <channel>[/yellow]")
+        return 0
+
+    with_cpu = bool(getattr(args, "cpu", False))
+    if not getattr(args, "watch", False):
+        console.print(_render_stats_table(gw, settings, names, with_cpu))
+        return 0
+
+    # Live monitoring: refresh until interrupted.
+    import time
+    from rich.live import Live
+
+    interval = max(0.5, float(getattr(args, "interval", 2.0)))
+    try:
+        with Live(_render_stats_table(gw, settings, names, with_cpu),
+                  console=console, refresh_per_second=4) as live:
+            while True:
+                time.sleep(interval)
+                live.update(_render_stats_table(gw, settings, names, with_cpu))
+    except KeyboardInterrupt:
+        console.print("[dim]stopped.[/dim]")
+    return 0
+
+
 def cmd_gateway(args, settings: Settings, console: Console) -> int:
     from .integrations import gateway as gw
 
@@ -270,11 +336,17 @@ def cmd_gateway(args, settings: Settings, console: Console) -> int:
         table.add_column("Name", style="cyan")
         table.add_column("Channel", style="green")
         table.add_column("Status", style="bold")
+        table.add_column("Memory", style="magenta", justify="right")
         table.add_column("CWD", style="dim")
         for name, record in gateways.items():
-            table.add_row(name, record.channel, mgr.status(settings, name), record.cwd or "-")
+            st = gw.gather_stats(settings, name)
+            table.add_row(name, record.channel, mgr.status(settings, name),
+                          gw.format_bytes(st.get("rss")), record.cwd or "-")
         console.print(table)
         return 0
+
+    if action == "stats":
+        return _gateway_stats(args, settings, console)
 
     if action == "list":
         gateways = gw.load_gateways(settings)
@@ -788,6 +860,11 @@ def build_parser() -> argparse.ArgumentParser:
     gwr.add_argument("name")
     gwstat = gwsub.add_parser("status", help="show gateway service status")
     gwstat.add_argument("name", nargs="?")
+    gwstats = gwsub.add_parser("stats", help="show live memory / resource usage of a gateway")
+    gwstats.add_argument("name", nargs="?")
+    gwstats.add_argument("--watch", action="store_true", help="refresh continuously until Ctrl-C")
+    gwstats.add_argument("--interval", type=float, default=2.0, help="watch refresh interval in seconds")
+    gwstats.add_argument("--cpu", action="store_true", help="also sample CPU%% (needs psutil)")
     gwsub.add_parser("list", help="list configured gateways")
     gwrun = gwsub.add_parser("run", help="run a gateway in the foreground (used by the system service)")
     gwrun.add_argument("name")

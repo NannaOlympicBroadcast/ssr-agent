@@ -151,10 +151,17 @@ ssr gateway install voicebox --channel xiaomi   # or feishu | wechat | all
 ssr gateway install voicebox --channel xiaomi --cwd /srv/app --no-start
 
 ssr gateway list                  # show configured gateways
-ssr gateway status [name]         # show service state (active / running / ...)
+ssr gateway status [name]         # show service state + memory (RSS) per gateway
+ssr gateway stats [name]          # live resource usage: PID / RSS / threads / source
+ssr gateway stats name --watch    # refresh continuously (Ctrl-C to stop); --cpu adds CPU%
 ssr gateway start|stop|restart name
 ssr gateway uninstall name        # stop, remove the unit, drop the record
 ```
+
+Memory is read per platform: systemd's cgroup `MemoryCurrent` on Linux, `ps`
+RSS on macOS, and the process `WorkingSetSize` (matched by command line) on
+Windows. Install [`psutil`](https://pypi.org/project/psutil/) for thread counts
+and `--cpu` sampling (optional — it degrades gracefully without it).
 
 Gateway definitions are stored in `~/.ssr/gateways.json`; the installed service
 simply runs `ssr gateway run <name>`, which loads the record and serves its
