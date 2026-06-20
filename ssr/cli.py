@@ -369,19 +369,11 @@ def cmd_acp(settings: Settings) -> int:
 
 
 def cmd_rc(args, settings: Settings, console: Console) -> int:
-    from .integrations import remote
-
-    action = getattr(args, "rc_action", None)
-    if action == "configure":
-        remote.configure_interactive(settings)
-        return 0
-    if action == "status":
-        return remote.show_status(settings)
-    if action == "tags":
-        tags = [t for chunk in args.tags for t in chunk.split(",")]
-        return remote.set_tags(settings, tags)
-    # default: connect (configuring on first run)
-    return remote.run_remote(settings, reconfigure=bool(getattr(args, "reconfigure", False)))
+    console.print(
+        "[red]rc(dispatch) is deprecated, the new agent bus protocol will be "
+        "implemented in next version.[/red]"
+    )
+    return 1
 
 
 def is_actual_api_key(value: str) -> bool:
@@ -826,13 +818,10 @@ def build_parser() -> argparse.ArgumentParser:
     chsub.add_parser("list", help="list registered channels")
     chsub.add_parser("status", help="show channels configuration status")
 
-    rc = sub.add_parser("rc", help="remote control: connect this instance to a dispatch server")
-    rc.add_argument("--reconfigure", action="store_true", help="re-run interactive setup")
-    rcsub = rc.add_subparsers(dest="rc_action")
-    rcsub.add_parser("configure", help="set dispatch endpoint, token, node name and tags")
-    rcsub.add_parser("status", help="show the saved remote-control configuration")
-    rctags = rcsub.add_parser("tags", help="set this node's tags (comma/space separated)")
-    rctags.add_argument("tags", nargs="+", help="tags, e.g. prod gpu  or  prod,gpu")
+    # rc / remote dispatch was removed; keep the command so it prints a clear
+    # deprecation notice instead of an "unknown command" error.
+    rc = sub.add_parser("rc", help="(deprecated) remote dispatch — removed")
+    rc.add_argument("rc_args", nargs="*", help=argparse.SUPPRESS)
 
     models = sub.add_parser("models", help="manage LLM models configuration")
     models_sub = models.add_subparsers(dest="models_action", required=True)

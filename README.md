@@ -38,11 +38,6 @@ ssr
    ak & sk.
 5. **ACP interface** — `ssr --experimental-acp` speaks the
    [Agent Client Protocol](https://agentclientprotocol.com).
-5b. **Remote control** — `ssr rc` connects this instance to an
-   [SSR Dispatch Server](https://github.com/NannaOlympicBroadcast/ssr-dispatch-server)
-   as a *node*. From the dispatch web UI you can browse this machine's files,
-   open a live terminal, and transfer files both ways; an MCP-over-SSE endpoint
-   lets any AI dispatch agents to your nodes by name or tag.
 6. **Built-in skills** installed to `~/.ssr/skills`:
    [larksuite](https://github.com/larksuite/cli) and
    [agent-browser](https://github.com/vercel-labs/agent-browser).
@@ -95,11 +90,6 @@ ssr gateway install voicebox --channel xiaomi   # create + start a background se
 ssr gateway status                              # show all gateways and their state
 ssr gateway stop voicebox                       # stop / start / restart
 ssr gateway uninstall voicebox                  # remove the service
-
-# Remote control (connect to a dispatch server as a node)
-ssr rc                   # first run prompts for endpoint + token, then connects
-ssr rc status            # show the saved remote-control config
-ssr rc tags prod,gpu     # set this node's tags (applied on next connect)
 
 # Run EvalScope benchmark with custom runner
 python run_benchmark.py
@@ -202,23 +192,12 @@ to serve a different channel (`channel on feishu|wechat|all`) or a gateway.
 Build with `--build-arg INSTALL_NODE=true` to also bundle Node.js for the
 chrome-devtools / miot MCP plugins.
 
-### Remote control (`ssr rc`)
+### Remote control (`ssr rc`) — removed
 
-Run `ssr rc` to register this machine as a **node** on a dispatch server. The
-node dials out over a single WebSocket (no inbound port needed) and serves:
-
-- **Filesystem** browsing and **file/image transfer** both ways.
-- An interactive **terminal** (a real PTY) driven from the dispatch web UI.
-- One-shot shell commands and full **`agent.run`** tasks dispatched over MCP.
-
-First run is interactive (dispatch endpoint, API token, node name, tags); the
-config is saved to `~/.ssr/remote.json`. See the
-[ssr-dispatch-server](https://github.com/NannaOlympicBroadcast/ssr-dispatch-server)
-project for the server, web UI, and the `<baseurl>/mcp?key=<token>` endpoint.
-
-From the dispatch web UI you can **chat** with the agent on a node (with file &
-image attachments and a live preview of the agent's thinking and tool calls),
-and browse each node's **past sessions**.
+`ssr rc` and the remote dispatch integration have been **removed**. Running
+`ssr rc` now prints: *"rc(dispatch) is deprecated, the new agent bus protocol
+will be implemented in next version."* The replacement agent-bus protocol is
+planned for a future release.
 
 ### EvalScope Benchmark (`run_benchmark.py`)
 
@@ -255,7 +234,7 @@ The agent dynamically loads custom behavior rules from `~/.ssr/rules.md` (global
 
 When the agent executes a background command via the `spawn_terminal` tool, it is monitored asynchronously. Upon completion of the process:
 - The agent is automatically woken up for a single turn with the terminal exit status.
-- The agent's generated response is pushed back to the corresponding channel (such as Feishu, WeChat, or Remote Control/RC client) from which the command was initiated.
+- The agent's generated response is pushed back to the corresponding channel (such as Feishu, WeChat, or XiaoAI) from which the command was initiated.
 
 ### Hooks Mechanism
 
@@ -292,7 +271,7 @@ Automatically discovers and loads Claude-Code/Codex-style plugins (which have `.
 
 *   **`miot`**: A built-in Xiaomi Home (MIoT) device control plugin. It is automatically installed into `~/.ssr/plugins/miot` during initialization. It provides comprehensive tools for discovering, querying, and controlling your Xiaomi smart devices (like lights, outlets, sensors, etc.).
 
-### HTTP/SSE MCP and Remote Dispatch
+### HTTP/SSE MCP
 
 The agent supports two transport types for external Model Context Protocol (MCP) servers:
 - **Stdio Transport**: Spawns a local subprocess and communicates via standard input/output (`command` and `args` in the configuration).
@@ -318,14 +297,9 @@ In `~/.ssr/mcp.json` or plugin configurations, use `url` instead of `command` to
 }
 ```
 
-#### Auto-registered Dispatch Server
-
-If you have configured remote control using `ssr rc` (which stores credentials in `~/.ssr/remote.json`), the agent automatically detects this configuration and registers a default SSE MCP server named `"dispatch"`. Once registered, all tools exposed by the dispatch server (e.g. `list_nodes`, `run_command`, `run_agent`) become immediately available to the agent as `mcp__dispatch__list_nodes`, `mcp__dispatch__run_command`, etc.
-
 ### Session recording
 
-
-Every conversation turn — REPL, one-shot, dispatched agent run, or web chat — is
+Every conversation turn — REPL, one-shot, or channel agent run — is
 recorded as an append-only `~/.ssr/sessions/<id>.jsonl` transcript. List them in
 the TUI with `/sessions`; `/clear` starts a fresh session.
 

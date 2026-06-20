@@ -145,33 +145,6 @@ class IMApprovalHandler(ApprovalHandler):
             self.send_fn(target, "❌ Command approval request timed out. Denied.")
             return ApprovalDecision.DENY
 
-class RCApprovalHandler(ApprovalHandler):
-    def __init__(self, send_fn, timeout: float = 60.0):
-        self.send_fn = send_fn
-        self.timeout = timeout
-
-    def request_approval(self, command: str, context: dict | None = None) -> ApprovalDecision:
-        # Remote control approval behaves similarly to IM approval
-        target = (context or {}).get("target")
-        self.send_fn(
-            target,
-            f"⚠ Command requires approval: `{command}`\nUse /approve, /alwaysallow, or /disallow [reason]"
-        )
-        
-        approval = PendingApproval(command)
-        set_active_approval(approval)
-        self.denial_reason = ""
-
-        signaled = approval.event.wait(timeout=self.timeout)
-        set_active_approval(None)
-
-        if signaled:
-            if approval.decision == ApprovalDecision.DENY:
-                self.denial_reason = approval.reason
-            return approval.decision
-        else:
-            return ApprovalDecision.DENY
-
 class AutoApprovalHandler(ApprovalHandler):
     def request_approval(self, command: str, context: dict | None = None) -> ApprovalDecision:
         return ApprovalDecision.ALLOW_ONCE

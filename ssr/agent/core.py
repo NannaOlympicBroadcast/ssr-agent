@@ -479,11 +479,8 @@ class SSRAgent:
                     
                     if terminal_context:
                         channel_name, target = terminal_context
-                        if channel_name == "rc":
-                            self._emit("wakeup", text=reply)
-                        else:
-                            from ssr.agent.tools_push import push_notification_impl
-                            push_notification_impl(self.settings, channel_name, target, reply)
+                        from ssr.agent.tools_push import push_notification_impl
+                        push_notification_impl(self.settings, channel_name, target, reply)
                 except Exception:
                     pass
             threading.Thread(target=run_wakeup, daemon=True).start()
@@ -524,12 +521,12 @@ class SSRAgent:
 
 
 def _start_mcp_manager(settings: Settings) -> MCPManager:
-    """Build an :class:`MCPManager` from ``mcp.json`` + plugins + remote dispatch
-    and start its servers.
+    """Build an :class:`MCPManager` from ``mcp.json`` + plugins and start its
+    servers.
 
-    ``MCPManager.from_settings`` is the unified loader: it merges ``mcp.json``,
-    plugin-contributed servers (with ``__dirname`` and ``${namespace.key}``
-    credential resolution) and the remote dispatch MCP.
+    ``MCPManager.from_settings`` is the unified loader: it merges ``mcp.json``
+    and plugin-contributed servers (with ``__dirname`` and ``${namespace.key}``
+    credential resolution).
 
     Never raises: if anything goes wrong an empty (no-op) manager is returned so
     the agent keeps working without MCP.
@@ -584,11 +581,5 @@ def _load_mcp_specs(settings: Settings) -> list[dict]:
     except Exception:
         pass
 
-    # 3. Remote dispatch config
-    if hasattr(settings, "home") and settings.home:
-        remote_path = settings.home / "remote.json"
-        if remote_path.exists() and not any(s["name"] == "mcp:dispatch" for s in specs):
-            specs.append({"name": "mcp:dispatch", "description": "Remote dispatch MCP server", "origin": "mcp"})
-        
     return specs
 

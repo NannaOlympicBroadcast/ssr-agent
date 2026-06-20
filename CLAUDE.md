@@ -17,8 +17,8 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr/agent/` — `SSRAgent` (ADK agent + genai fallback), `ToolKit`
   (filesystem, run_command, memory, web_search, search_context, sub-agents,
   planning), `MemoryStore`, `SessionStore` (append-only conversation transcripts
-  in `~/.ssr/sessions/<id>.jsonl`; every REPL / dispatched / chat turn is
-  recorded and is browsable via `/sessions` and over remote control).
+  in `~/.ssr/sessions/<id>.jsonl`; every REPL / one-shot / channel turn is
+  recorded and is browsable via `/sessions`).
 - `ssr/skills/` — skill discovery across `~/.agent`, `~/.codex`, `~/.gemini`,
   `~/.claude`, `~/.ssr` + built-in skill installer (bundled skills in
   `ssr/builtin_skills/`, incl. `review-mode`).
@@ -33,10 +33,7 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr/integrations/` — `pm2` background tasks, `feishu` (Lark) bot, `acp`
   (Agent Client Protocol) server, `mcp_client` (spawns the MCP servers in
   `~/.ssr/mcp.json` and speaks JSON-RPC over stdio; tools are exposed to the
-  model as `mcp__<server>__<tool>` and routed by `SSRAgent`), `remote`
-  (`ssr rc` — opens an outbound WebSocket to a dispatch server, registering this
-  instance as a *node* and serving filesystem / terminal (PTY) / command /
-  `agent.run` RPCs; config in `~/.ssr/remote.json`), `gateway` (`ssr gateway` —
+  model as `mcp__<server>__<tool>` and routed by `SSRAgent`), `gateway` (`ssr gateway` —
   installs a channel-bound instance as a **system service** via the native
   manager per OS: systemd user unit / launchd plist / Windows scheduled task;
   records in `~/.ssr/gateways.json`, the service runs `ssr gateway run <name>`).
@@ -59,6 +56,4 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - While the agent runs: `/stop` interrupts the task; `/btw <q>` answers a side
   question concurrently (isolated toolkit, no races). On an approval prompt,
   `/disallow <reason>` (or a typed reason in the TUI) is fed back to the model.
-- `ssr rc` — connect this instance to a dispatch server as a remote-control node
-  (`ssr rc status` / `ssr rc tags <a,b>` / `ssr rc configure` / `ssr rc --reconfigure`)
 - `python -m pytest` — run tests

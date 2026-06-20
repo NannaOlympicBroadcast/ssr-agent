@@ -235,15 +235,14 @@ class ToolKit:
     def send_file_to_user(self, path: str, caption: str = "") -> str:
         """Send a local file to the user so they can download/receive it.
 
-        In a remote-control (rc) web session the file is streamed to the browser
-        for download. Use this to deliver generated artifacts (reports, images,
+        In an IM/channel session (feishu/wechat) the file is delivered through
+        that channel. Use this to deliver generated artifacts (reports, images,
         archives, build outputs) to the user.
 
         Args:
             path: Path to the local file, absolute or relative to the project dir.
             caption: Optional short note shown alongside the file.
         """
-        import base64
         import mimetypes
 
         p = self._resolve(path)
@@ -256,19 +255,7 @@ class ToolKit:
         ctx = getattr(agent, "active_im_context", None) if agent is not None else None
         mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
 
-        if agent is not None and ctx and ctx[0] == "rc":
-            agent._emit(
-                "file",
-                tag="ssr",
-                name=p.name,
-                size=len(data),
-                mime=mime,
-                caption=caption,
-                data_b64=base64.b64encode(data).decode("ascii"),
-            )
-            return f"Sent file '{p.name}' ({len(data)} bytes) to the user."
-
-        # Other channels with native file support (feishu/wechat).
+        # Channels with native file support (feishu/wechat).
         if ctx and ctx[0] in ("feishu", "wechat"):
             try:
                 import ssr.channels  # ensure channels are registered
@@ -283,7 +270,7 @@ class ToolKit:
 
         return (
             f"File is ready at {p} ({len(data)} bytes). "
-            "Direct file delivery is only available in remote-control / IM sessions."
+            "Direct file delivery is only available in IM / channel sessions."
         )
 
     def push_notification(self, channel: str, target: str, message: str) -> str:
