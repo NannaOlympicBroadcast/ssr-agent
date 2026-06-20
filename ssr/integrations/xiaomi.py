@@ -110,6 +110,164 @@ class XiaomiUnavailable(RuntimeError):
     """Raised when miservice / aiohttp is not installed."""
 
 
+try:
+    from miservice import MiAccount
+except ImportError:
+    class MiAccount:  # type: ignore[no-redef]
+        pass
+
+
+class CustomMiAccount(MiAccount):
+    def __init__(self, session, username, password, token_store=None):
+        super().__init__(session, username, password, token_store)
+        # Load userAgent and deviceId immediately if present
+        if self.token:
+            user_agent = self.token.get("userAgent")
+            if user_agent:
+                self.now_ua = user_agent
+
+    async def _serviceLogin(self, uri, data=None):
+        # Keep User-Agent consistent with cached userAgent
+        user_agent = self.token.get("userAgent") if self.token else None
+        if not user_agent:
+            try:
+                user_agent = self.ua.random
+            except Exception:
+                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            if self.token is None:
+                self.token = {}
+            self.token["userAgent"] = user_agent
+            if self.token_store:
+                self.token_store.save_token(self.token)
+        
+        self.now_ua = user_agent
+        headers = {"User-Agent": user_agent}
+        cookies = {"sdkVersion": "3.9", "deviceId": self.token["deviceId"]}
+        if "passToken" in self.token:
+            cookies["userId"] = self.token["userId"]
+            cookies["passToken"] = self.token["passToken"]
+        else:
+            cookies["passToken"] = ""
+        url = "https://account.xiaomi.com/pass/" + uri
+        async with self.session.request(
+            "GET" if data is None else "POST",
+            url,
+            data=data,
+            cookies=cookies,
+            headers=headers,
+            ssl=False,
+        ) as r:
+            raw = await r.read()
+        resp = json.loads(raw[11:])
+        logger.debug("%s: %s", uri, resp)
+        return resp
+
+    async def login(self, sid):
+        import hashlib
+        # Ensure we load/preserve deviceId and userAgent before login
+        if not self.token:
+            self.token = self.token_store.load_token() if self.token_store else None
+            if not self.token:
+                self.token = {}
+                
+        if not self.token.get("deviceId"):
+            try:
+                from miservice.miaccount import get_random
+            except ImportError:
+                def get_random(length):
+                    import random
+                    import string
+                    return "".join(random.sample(string.ascii_letters + string.digits, length))
+            self.token["deviceId"] = get_random(16).upper()
+
+        if not self.token.get("userAgent"):
+            try:
+                self.token["userAgent"] = self.ua.random
+            except Exception:
+                self.token["userAgent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+        device_id = self.token.get("deviceId")
+        user_agent = self.token.get("userAgent")
+        self.now_ua = user_agent
+        
+        # Save deviceId and userAgent to store immediately so they are not lost
+        if self.token_store and device_id and user_agent:
+            self.token_store.save_token({"deviceId": device_id, "userAgent": user_agent})
+
+        # If we already have a valid token for this sid, return True immediately!
+        if self.token and sid in self.token and self.token.get("userId") and self.token.get("passToken"):
+            return True
+
+        try:
+            resp = await self._serviceLogin(f"serviceLogin?sid={sid}&_json=true")
+            if resp["code"] != 0:
+                data = {
+                    "_json": "true",
+                    "qs": resp["qs"],
+                    "sid": resp["sid"],
+                    "_sign": resp["_sign"],
+                    "callback": resp["callback"],
+                    "user": self.username,
+                    "hash": hashlib.md5(self.password.encode()).hexdigest().upper(),
+                }
+                resp = await self._serviceLogin("serviceLoginAuth2", data)
+                
+            # If the response indicates captcha or notification (verification), or does not have userId
+            if (resp.get("code") != 0 or 
+                "notificationUrl" in resp or 
+                "captchaUrl" in resp or 
+                ("userId" not in resp and not self.token.get("userId"))):
+                raise Exception(resp)
+
+            if "userId" in resp:
+                self.token["userId"] = resp["userId"]
+            if "passToken" in resp:
+                self.token["passToken"] = resp["passToken"]
+
+            serviceToken = await self._securityTokenService(
+                resp["location"], resp["nonce"], resp["ssecurity"]
+            )
+            self.token[sid] = (resp["ssecurity"], serviceToken)
+            if self.token_store:
+                self.token_store.save_token(self.token)
+            return True
+
+        except Exception as e:
+            # Restore the deviceId and userAgent and save them back
+            self.token = {"deviceId": device_id, "userAgent": user_agent}
+            if self.token_store:
+                self.token_store.save_token(self.token)
+            
+            # Extract clean description to avoid spamming the console with the massive notificationUrl dict
+            err_msg = str(e)
+            if e.args and isinstance(e.args[0], dict):
+                resp_dict = e.args[0]
+                if "notificationUrl" in resp_dict:
+                    err_msg = "安全验证未完成 (waiting for safety verification)"
+                elif "captchaUrl" in resp_dict:
+                    err_msg = "需要输入图形验证码 (captcha required)"
+                else:
+                    err_msg = resp_dict.get("description") or resp_dict.get("desc") or "login failed"
+            logger.debug("MiAccount login failed: %s", err_msg)
+            return False
+
+    async def mi_request(self, sid, url, data, headers, relogin=True):
+        # Override to ensure that if mi_request sets self.token = None on auth error,
+        # we preserve the deviceId and userAgent!
+        device_id = self.token.get("deviceId") if self.token else None
+        user_agent = self.token.get("userAgent") if self.token else None
+        try:
+            return await super().mi_request(sid, url, data, headers, relogin)
+        except Exception:
+            # If mi_request fails and sets self.token = None, restore deviceId and userAgent
+            if self.token is None and device_id and user_agent:
+                self.token = {"deviceId": device_id, "userAgent": user_agent}
+                if self.token_store:
+                    self.token_store.save_token(self.token)
+            raise
+
+
+
 def _import_miservice():
     missing: list[str] = []
     try:
@@ -128,7 +286,7 @@ def _import_miservice():
             "  pip install -e .   # 或： pip install miservice_fork aiohttp\n"
             "注意：是 'miservice_fork'（不是同名的 'miservice'），它提供 MiTokenStore。"
         )
-    return MiAccount, MiNAService, MiTokenStore
+    return CustomMiAccount, MiNAService, MiTokenStore
 
 
 @dataclass
@@ -169,17 +327,21 @@ class XiaomiSpeaker:
         if not self.cfg.account or not self.cfg.password:
             raise RuntimeError("Mi account/password is empty — run: ssr channel config xiaomi")
         self._session = aiohttp.ClientSession()
-        self._account = MiAccount(
-            self._session,
-            self.cfg.account,
-            self.cfg.password,
-            MiTokenStore(str(tok)),
-        )
-        self._mina = MiNAService(self._account)
-        logger.info("Mi account/MiNAService initialised; logging in…")
-        await self._login_or_diagnose()
-        logger.info("Mi login OK; selecting speaker…")
-        self.device = await self._select_device()
+        try:
+            self._account = MiAccount(
+                self._session,
+                self.cfg.account,
+                self.cfg.password,
+                MiTokenStore(str(tok)),
+            )
+            self._mina = MiNAService(self._account)
+            logger.info("Mi account/MiNAService initialised; logging in…")
+            await self._login_or_diagnose()
+            logger.info("Mi login OK; selecting speaker…")
+            self.device = await self._select_device()
+        except Exception:
+            await self.close()
+            raise
         logger.info(
             "selected speaker: name=%r deviceID=%s hardware=%s did=%s",
             self.device.name, self.device.device_id, self.device.hardware, self.device.did,
@@ -208,8 +370,42 @@ class XiaomiSpeaker:
             logger.exception("MiAccount.login raised")
         if ok:
             return
-        reason = await _diagnose_login(self._account, self.cfg)
+
+        notif_url, reason = await _diagnose_login(self._account, self.cfg)
+        if not notif_url:
+            raise RuntimeError(reason + "\n\n" + _miot_cache_note())
+
+        # If it is a verification/captcha URL, print instructions and wait
+        print("\n" + "=" * 80)
+        print("小米账号需要【安全验证】才能登录（常见于服务器/新 IP 登录）。")
+        print("请在浏览器中打开以下链接完成验证：")
+        print("-" * 80)
+        print(notif_url)
+        print("-" * 80)
+        print("【重要提示】")
+        print("1. 该链接非常长，请务必完整复制。如果链接被终端换行，复制时可能会夹带")
+        print("   多余的空格或换行符，请在浏览器地址栏手动删掉它们，否则会报 404！")
+        print("2. 验证完成后，如果浏览器跳转到 401 页面（如 sts 接口 401 错误）是正常现象。")
+        print("=" * 80 + "\n")
+
+        import asyncio
+        loop = asyncio.get_running_loop()
+        # Wait for the user to complete verification and press enter
+        await loop.run_in_executor(None, input, "【请在浏览器中完成验证，完成后在此处按回车键(Enter)以继续登录】...")
+
+        print("\n正在重新尝试登录并检测验证状态...")
+        try:
+            ok = await self._account.login("micoapi")
+            if ok:
+                print("[+] 验证成功，小米账号已成功登录并缓存登录态！")
+                return
+        except Exception as e:
+            logger.debug("尝试登录时出错: %s", e)
+
+        # If it still failed, perform diagnosis and raise error
+        notif_url, reason = await _diagnose_login(self._account, self.cfg)
         raise RuntimeError(reason + "\n\n" + _miot_cache_note())
+
 
     async def _select_device(self) -> SpeakerDevice:
         try:
@@ -342,7 +538,7 @@ def _miot_cache_note() -> str:
     )
 
 
-async def _diagnose_login(account, cfg: XiaomiConfig) -> str:
+async def _diagnose_login(account, cfg: XiaomiConfig) -> tuple[str | None, str]:
     """Replay the login to surface why it failed (verification / bad password)."""
     import hashlib
 
@@ -355,7 +551,10 @@ async def _diagnose_login(account, cfg: XiaomiConfig) -> str:
     except Exception:
         get_random = None
     try:
-        account.token = {"deviceId": (get_random(16).upper() if get_random else "0123456789ABCDEF")}
+        existing_device_id = account.token.get("deviceId") if account.token else None
+        if not existing_device_id:
+            existing_device_id = (get_random(16).upper() if get_random else "0123456789ABCDEF")
+        account.token = {"deviceId": existing_device_id}
         resp = await account._serviceLogin("serviceLogin?sid=micoapi&_json=true")
         if resp.get("code") != 0:
             data = {
@@ -370,7 +569,7 @@ async def _diagnose_login(account, cfg: XiaomiConfig) -> str:
             resp = await account._serviceLogin("serviceLoginAuth2", data)
     except Exception as e:
         logger.exception("login diagnosis failed")
-        return f"{generic}\n(诊断时再次出错：{e})"
+        return None, f"{generic}\n(诊断时再次出错：{e})"
 
     code = resp.get("code")
     desc = resp.get("desc") or resp.get("description") or ""
@@ -380,28 +579,34 @@ async def _diagnose_login(account, cfg: XiaomiConfig) -> str:
     if notif:
         if notif.startswith("/"):
             notif = "https://account.xiaomi.com" + notif
-        return (
+        reason = (
             "小米账号需要【安全验证】才能登录（常见于服务器/新 IP 登录）。\n"
-            "请在浏览器打开下面的链接，用该小米账号完成验证（短信/设备确认）：\n"
-            f"    {notif}\n"
-            "完成后重新运行：ssr channel on xiaomi（验证一次后会缓存登录态）。"
+            "请在浏览器中打开以下链接完成验证（短信/设备确认）：\n\n"
+            f"{notif}\n\n"
+            "【注意】该链接非常长，请务必完整复制。如果链接换行，复制时可能夹带多余空格或换行符，请在浏览器地址栏中删除，否则会报 404！\n"
+            "提示：验证完成后，浏览器如果跳转到 401 页面（如 sts 接口 401 错误）是正常现象。\n"
+            "此时直接关闭浏览器，重新运行 ssr channel on xiaomi 即可正常登录。"
         )
+        return notif, reason
     if resp.get("captchaUrl"):
         cap = resp["captchaUrl"]
         if cap.startswith("/"):
             cap = "https://account.xiaomi.com" + cap
-        return (
+        reason = (
             "小米登录需要图形验证码（captcha）。请先在浏览器登录一次小米账号完成验证：\n"
             f"    {cap}\n然后重试 ssr channel on xiaomi。"
         )
+        return cap, reason
     if code == 70016 or "password" in desc.lower():
-        return f"小米账号或密码不正确（code={code} {desc}）。请检查 ~/.ssr/xiaomi.json 的 account/password。"
+        reason = f"小米账号或密码不正确（code={code} {desc}）。请检查 ~/.ssr/xiaomi.json 的 account/password。"
+        return None, reason
     if "userId" not in resp:
-        return (
+        reason = (
             f"小米登录未返回 userId（code={code} {desc}; keys={list(resp.keys())}）。"
             "通常是需要安全验证或账号/密码不正确。"
         )
-    return f"{generic}\n(code={code} {desc})"
+        return None, reason
+    return None, f"{generic}\n(code={code} {desc})"
 
 
 def _chunk_for_tts(text: str, limit: int = 240) -> list[str]:

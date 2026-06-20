@@ -67,6 +67,8 @@ class ToolKit:
         self.terminal = AsyncTerminal()
         self.permission_manager = PermissionManager(settings)
         self.approval_handler = TUIApprovalHandler()
+        self.approval_handler.toolkit = self
+
 
     # -------------------------------------------------------------- approvals
     def _approval_context(self) -> dict:

@@ -16,6 +16,8 @@ fi
 echo "==> Initialising ~/.ssr…"
 ssr init || python3 -m ssr init
 
+npm install -g chrome-devtools-mcp@latest
+
 cat <<'EOF'
 
 ✓ SSR Agent installed.

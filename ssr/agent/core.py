@@ -255,7 +255,7 @@ class SSRAgent:
         """Run a single text turn (convenience wrapper over :meth:`run_parts`)."""
         return self.run_parts([{"type": "text", "text": user_message}])
 
-    def run_goal(self, goal: str, max_rounds: int = 5) -> str:
+    def run_goal(self, goal: str, max_rounds: int = 5, turn_runner: callable | None = None) -> str:
         """Iterate on a user goal until the model reports it is satisfied.
 
         The loop deliberately uses the normal agent/tool path rather than a
@@ -276,7 +276,10 @@ class SSRAgent:
                 "`GOAL_COMPLETE:`; otherwise perform the next concrete step and "
                 "explain what remains."
             )
-            last_reply = self.run(round_prompt)
+            if turn_runner:
+                last_reply = turn_runner(round_prompt)
+            else:
+                last_reply = self.run(round_prompt)
             if last_reply.lstrip().startswith("GOAL_COMPLETE:"):
                 return last_reply
         return (

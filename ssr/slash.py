@@ -129,7 +129,10 @@ def handle(command: str, agent: SSRAgent, settings: Settings, console: Console) 
         else:
             goal = " ".join(args)
             console.print(f"[dim magenta]working toward goal…[/dim magenta] {goal}")
-            console.print(agent.run_goal(goal))
+            from .cli import _run_turn_with_controls
+            def turn_runner(prompt: str) -> str:
+                return _run_turn_with_controls(agent, prompt, console)
+            console.print(agent.run_goal(goal, turn_runner=turn_runner))
 
     elif cmd == "/model":
         if not args:

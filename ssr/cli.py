@@ -354,6 +354,42 @@ def cmd_serve(args, settings: Settings, console: Console) -> int:
     return 0
 
 
+class WindowsStdinReader:
+    def __init__(self):
+        self.buffer = []
+
+    def poll_line(self) -> str | None:
+        """Polls for a line of input. Returns the line (without newline) if complete, else None."""
+        import msvcrt
+        import sys
+        while msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            if ch in ('\x00', '\xe0'):
+                # Read the next character which is the actual code of the special key
+                if msvcrt.kbhit():
+                    msvcrt.getwch()
+                continue
+            if ch == '\r' or ch == '\n':
+                line = "".join(self.buffer)
+                self.buffer = []
+                print()  # print a newline to echo the enter key
+                return line
+            elif ch == '\b':
+                if self.buffer:
+                    self.buffer.pop()
+                    sys.stdout.write('\b \b')
+                    sys.stdout.flush()
+            elif ch == '\x03':  # Ctrl+C
+                raise KeyboardInterrupt
+            elif ch == '\x04':  # Ctrl+D
+                raise EOFError
+            elif ord(ch) >= 32:
+                self.buffer.append(ch)
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+        return None
+
+
 def _run_turn_with_controls(agent, line: str, console: Console) -> str:
     """Run a main agent turn while accepting ``/stop`` and ``/btw`` concurrently.
 
@@ -377,44 +413,129 @@ def _run_turn_with_controls(agent, line: str, console: Console) -> str:
     t = threading.Thread(target=worker, daemon=True)
     t.start()
 
+    is_win_tty = (sys.platform == "win32" and sys.stdin is not None and sys.stdin.isatty())
     can_poll = hasattr(select, "select") and sys.stdin is not None and sys.stdin.isatty()
-    while t.is_alive():
-        ctrl = None
-        if can_poll:
-            try:
-                ready, _, _ = select.select([sys.stdin], [], [], 0.2)
-            except Exception:
-                can_poll = False
-                ready = []
-            if ready:
-                ctrl = sys.stdin.readline().strip()
-        else:
-            t.join(timeout=0.2)
-            continue
-        if not ctrl:
-            continue
-        low = ctrl.lower()
-        if low in ("/stop", "/cancel"):
-            if agent.request_stop():
-                console.print("[yellow]⏹ stop requested — finishing the current step…[/yellow]")
+
+    agent._is_polling_stdin = can_poll or is_win_tty
+
+    win_reader = None
+    if is_win_tty:
+        win_reader = WindowsStdinReader()
+
+    try:
+        while t.is_alive():
+            ctrl = None
+            if win_reader:
+                ctrl = win_reader.poll_line()
+                if ctrl is None:
+                    t.join(timeout=0.05)
+                    continue
+            elif can_poll:
+                try:
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+                except Exception:
+                    can_poll = False
+                    ready = []
+                if ready:
+                    ctrl = sys.stdin.readline().strip()
             else:
-                console.print("[dim]Nothing is running.[/dim]")
-        elif low == "/btw" or low.startswith("/btw "):
-            question = ctrl[4:].strip()
-            if not question:
-                console.print("[yellow]Usage: /btw <question>[/yellow]")
+                t.join(timeout=0.2)
                 continue
 
-            def side(q: str = question) -> None:
-                ans = agent.answer_side_question(q)
-                console.print(f"\n[bold cyan]btw ▸[/bold cyan] {ans}\n")
+            if not ctrl:
+                continue
 
-            threading.Thread(target=side, daemon=True).start()
-            console.print("[dim cyan]↳ answering your side question…[/dim cyan]")
-        else:
-            console.print(
-                "[dim](busy — use /stop to interrupt or /btw <question> to ask alongside)[/dim]"
-            )
+            from .approval import get_active_approval, ApprovalDecision
+            approval = get_active_approval()
+
+            if approval:
+                choice = ctrl.strip()
+                if choice.startswith("/"):
+                    cmd_parts = choice.split()
+                    cmd_lower = cmd_parts[0].lower()
+                    if cmd_lower in ("/approve", "/ok", "/yes"):
+                        approval.decision = ApprovalDecision.ALLOW_ONCE
+                        approval.event.set()
+                        console.print("[green]Command approved (once).[/green]")
+                    elif cmd_lower in ("/alwaysallow", "/always"):
+                        approval.decision = ApprovalDecision.ALWAYS_ALLOW
+                        approval.event.set()
+                        console.print("[green]Command pattern always allowed.[/green]")
+                    elif cmd_lower == "/disallow" or cmd_lower.startswith("/disallow"):
+                        reason = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else "Denied by user"
+                        approval.decision = ApprovalDecision.DENY
+                        approval.reason = reason
+                        approval.event.set()
+                        console.print(f"[red]Command disallowed: {reason}[/red]")
+                    elif cmd_lower in ("/stop", "/cancel"):
+                        agent.request_stop()
+                        approval.decision = ApprovalDecision.DENY
+                        approval.reason = "Stop requested"
+                        approval.event.set()
+                        console.print("[yellow]⏹ stop requested — finishing the current step…[/yellow]")
+                    else:
+                        from .slash import handle as handle_slash
+                        if not handle_slash(choice, agent, agent.settings, console):
+                            agent.request_stop()
+                            approval.decision = ApprovalDecision.DENY
+                            approval.event.set()
+                            console.print("[dim]bye[/dim]")
+                            import os
+                            os._exit(0)
+                else:
+                    if choice == "1":
+                        approval.decision = ApprovalDecision.ALLOW_ONCE
+                        approval.event.set()
+                        console.print("[green]Command approved (once).[/green]")
+                    elif choice == "2":
+                        approval.decision = ApprovalDecision.ALWAYS_ALLOW
+                        approval.event.set()
+                        console.print("[green]Command pattern always allowed.[/green]")
+                    elif choice.startswith("3"):
+                        reason = choice[1:].strip()
+                        if not reason:
+                            try:
+                                reason = input("Reason / what to do instead (optional): ").strip()
+                            except (KeyboardInterrupt, EOFError):
+                                reason = ""
+                        approval.decision = ApprovalDecision.DENY
+                        approval.reason = reason or "Denied by user"
+                        approval.event.set()
+                        console.print(f"[red]Command disallowed: {approval.reason}[/red]")
+                    else:
+                        console.print("[yellow]Invalid choice. Please enter 1, 2, or 3, or type a slash command (e.g. /approve, /disallow).[/yellow]")
+            else:
+                low = ctrl.lower()
+                if low in ("/stop", "/cancel"):
+                    if agent.request_stop():
+                        console.print("[yellow]⏹ stop requested — finishing the current step…[/yellow]")
+                    else:
+                        console.print("[dim]Nothing is running.[/dim]")
+                elif low == "/btw" or low.startswith("/btw "):
+                    question = ctrl[4:].strip()
+                    if not question:
+                        console.print("[yellow]Usage: /btw <question>[/yellow]")
+                        continue
+
+                    def side(q: str = question) -> None:
+                        ans = agent.answer_side_question(q)
+                        console.print(f"\n[bold cyan]btw ▸[/bold cyan] {ans}\n")
+
+                    threading.Thread(target=side, daemon=True).start()
+                    console.print("[dim cyan]↳ answering your side question…[/dim cyan]")
+                elif ctrl.startswith("/"):
+                    from .slash import handle as handle_slash
+                    if not handle_slash(ctrl, agent, agent.settings, console):
+                        agent.request_stop()
+                        console.print("[dim]bye[/dim]")
+                        import os
+                        os._exit(0)
+                else:
+                    console.print(
+                        "[dim](busy — use /stop to interrupt or /btw <question> to ask alongside)[/dim]"
+                    )
+    finally:
+        agent._is_polling_stdin = False
     t.join()
     return holder.get("reply", "")
 

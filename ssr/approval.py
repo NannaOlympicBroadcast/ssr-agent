@@ -46,32 +46,75 @@ def set_active_approval(approval: PendingApproval | None) -> None:
 class TUIApprovalHandler(ApprovalHandler):
     def __init__(self, console: Console | None = None):
         self.console = console or Console()
+        self.toolkit = None
 
     def request_approval(self, command: str, context: dict | None = None) -> ApprovalDecision:
         self.denial_reason = ""
         self.console.print(f"\n[bold yellow]⚠ Command requires approval:[/bold yellow] [bold cyan]{command}[/bold cyan]")
         self.console.print("[1] Allow once  [2] Always allow  [3] Deny (you may add a reason)")
 
-        while True:
+        agent = getattr(self.toolkit, "agent_instance", None) if self.toolkit else None
+        is_polling = getattr(agent, "_is_polling_stdin", False) if agent else False
+
+        if is_polling:
+            approval = PendingApproval(command)
+            set_active_approval(approval)
             try:
-                choice = input("Choice (1-3): ").strip()
-                if choice == "1":
-                    return ApprovalDecision.ALLOW_ONCE
-                elif choice == "2":
-                    return ApprovalDecision.ALWAYS_ALLOW
-                elif choice == "3":
-                    # Let the user steer the agent instead of just refusing: a
-                    # typed reason is handed back to the model as guidance.
-                    try:
-                        reason = input("Reason / what to do instead (optional): ").strip()
-                    except (KeyboardInterrupt, EOFError):
-                        reason = ""
-                    self.denial_reason = reason
+                # Wait for the event to be set by the main thread polling stdin.
+                approval.event.wait()
+                if approval.decision == ApprovalDecision.DENY:
+                    self.denial_reason = approval.reason
+                return approval.decision
+            finally:
+                set_active_approval(None)
+        else:
+            while True:
+                try:
+                    choice = input("Choice (1-3): ").strip()
+                    if not choice:
+                        continue
+                    if choice.startswith("/"):
+                        low = choice.lower().split()[0]
+                        if low in ("/approve", "/ok", "/yes"):
+                            return ApprovalDecision.ALLOW_ONCE
+                        elif low in ("/alwaysallow", "/always"):
+                            return ApprovalDecision.ALWAYS_ALLOW
+                        elif low == "/disallow" or low.startswith("/disallow "):
+                            parts = choice.strip().split()
+                            reason = " ".join(parts[1:]) if len(parts) > 1 else "Denied by user"
+                            self.denial_reason = reason
+                            return ApprovalDecision.DENY
+                        elif low in ("/stop", "/cancel"):
+                            if agent:
+                                agent.request_stop()
+                                self.console.print("[yellow]⏹ stop requested — finishing the current step…[/yellow]")
+                            return ApprovalDecision.DENY
+                        else:
+                            from ssr.slash import handle as handle_slash
+                            settings = self.toolkit.settings if self.toolkit else None
+                            if agent and settings:
+                                handle_slash(choice, agent, settings, self.console)
+                            else:
+                                self.console.print("[yellow]Cannot execute slash command: agent/settings not available.[/yellow]")
+                            continue
+
+                    if choice == "1":
+                        return ApprovalDecision.ALLOW_ONCE
+                    elif choice == "2":
+                        return ApprovalDecision.ALWAYS_ALLOW
+                    elif choice == "3":
+                        # Let the user steer the agent instead of just refusing: a
+                        # typed reason is handed back to the model as guidance.
+                        try:
+                            reason = input("Reason / what to do instead (optional): ").strip()
+                        except (KeyboardInterrupt, EOFError):
+                            reason = ""
+                        self.denial_reason = reason
+                        return ApprovalDecision.DENY
+                    else:
+                        self.console.print("[yellow]Invalid choice, please select 1, 2, or 3.[/yellow]")
+                except (KeyboardInterrupt, EOFError):
                     return ApprovalDecision.DENY
-                else:
-                    self.console.print("[yellow]Invalid choice, please select 1, 2, or 3.[/yellow]")
-            except (KeyboardInterrupt, EOFError):
-                return ApprovalDecision.DENY
 
 class IMApprovalHandler(ApprovalHandler):
     def __init__(self, send_fn, timeout: float = 60.0):

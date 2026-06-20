@@ -14,7 +14,7 @@ ssr
 
 ## Features
 
-1. **Polished TUI** — `ssr` prints an ASCII-art *Welcome To SSR* banner, then drops into an interactive REPL.
+1. **Polished TUI** — `ssr` prints an ASCII-art *Welcome To SSR* banner, then drops into an interactive REPL. Features non-blocking concurrent stdin polling on both Windows and POSIX, allowing you to run slash commands (like `/status`, `/help`, `/bypass-permissions`), ask side questions with `/btw`, request termination with `/stop`, or approve/disallow pending commands (via `1`/`2`/`3` or `/approve`/`/alwaysallow`/`/disallow`) while the agent loop is executing (including in `/goal` mode).
 2. **Coding-agent core** — step planning, filesystem access, command execution,
    durable **MEMORY**, **sub-agent** spawning, and **Tavily** web search.
 3. **`claude.md`-compatible config** + skills discovered from `~/.agent/skills`,
@@ -72,11 +72,13 @@ ssr --experimental-acp   # run as an ACP server
 # background tasks (pm2)
 ssr task create nightly "summarise today's git log" --cron "0 22 * * *"
 
-# Unified Channels (Feishu / WeChat / etc.) - Note: `ssr feishu` is deprecated
+# Unified Channels (Feishu / WeChat / Xiaomi / etc.) - Note: `ssr feishu` is deprecated
 ssr channel config feishu  # configure Feishu channel (alias: configure)
 ssr channel on feishu      # start listening on Feishu channel (alias: serve)
 ssr channel config wechat  # configure WeChat channel (scanning QR code to log in; network-resilient status checks handling wait, scanned, expired, canceled, timeout, and customized error message responses; press Ctrl+C to cancel)
 ssr channel on wechat      # start listening on WeChat channel (with dynamic X-WECHAT-UIN headers, full base_info / client_id payload alignment, incoming image message decryption support, auto-exit on session timeout, robust media/file send support, and verbose logging for API calls)
+ssr channel config xiaomi  # configure Xiaomi speaker channel (shares credentials with the miot plugin)
+ssr channel on xiaomi      # start listening on Xiaomi speaker channel (ASR query polling and TTS reply; supports interactive security verification using original URLs directly; ensure copying the entire URL without extra spaces/newlines to avoid 404 errors; 401 page redirection in browser is expected—simply return and press Enter to continue)
 
 # Multi-Model configurations
 ssr models config        # interactively configure LLM models (Gemini, Anthropic, OpenAI)
