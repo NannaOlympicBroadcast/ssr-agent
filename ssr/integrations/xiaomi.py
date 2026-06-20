@@ -111,14 +111,23 @@ class XiaomiUnavailable(RuntimeError):
 
 
 def _import_miservice():
+    missing: list[str] = []
     try:
         import aiohttp  # noqa: F401
+    except ImportError:
+        missing.append("aiohttp")
+    MiAccount = MiNAService = MiTokenStore = None
+    try:
         from miservice import MiAccount, MiNAService, MiTokenStore  # noqa: F401
-    except ImportError as e:  # pragma: no cover - optional dependency
+    except ImportError:
+        missing.append("miservice_fork")
+    if missing:  # pragma: no cover - optional dependency
         raise XiaomiUnavailable(
-            "小爱音箱接入需要 'miservice' 与 'aiohttp'。请安装：\n"
-            "  pip install miservice_fork aiohttp"
-        ) from e
+            "小爱音箱接入缺少依赖：" + ", ".join(missing) + "。请安装其一：\n"
+            '  pip install "ssr-agent[xiaomi]"\n'
+            "  # 或直接安装： pip install miservice_fork aiohttp\n"
+            "注意：是 'miservice_fork'（不是同名的 'miservice'），它提供 MiTokenStore。"
+        )
     return MiAccount, MiNAService, MiTokenStore
 
 
