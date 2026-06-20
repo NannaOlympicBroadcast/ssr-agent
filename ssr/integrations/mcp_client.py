@@ -35,6 +35,7 @@ import atexit
 import json
 import logging
 import os
+import shutil
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -117,9 +118,10 @@ class MCPServer:
         if self._started:
             return self._tools
         full_env = {**os.environ, **{str(k): str(v) for k, v in self.env.items()}}
+        popen_args = _resolve_spawn_args(self.command, self.args)
         try:
             self._proc = subprocess.Popen(
-                [self.command, *self.args],
+                popen_args,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -127,7 +129,7 @@ class MCPServer:
                 env=full_env,
                 # Force binary mode for stdout/stderr to avoid encoding errors
                 bufsize=1,
-                # Ensure we handle text encoding explicitly if needed, 
+                # Ensure we handle text encoding explicitly if needed,
                 # but reading bytes is safer for JSON-RPC lines
             )
         except (OSError, ValueError) as e:
@@ -361,6 +363,28 @@ class MCPManager:
                 server.stop()
             except Exception:  # pragma: no cover - best-effort teardown
                 pass
+
+
+def _resolve_spawn_args(command: str, args: list[str]) -> list[str]:
+    """Build the argv for ``subprocess.Popen`` in a cross-platform way.
+
+    On Windows, Node launchers such as ``npx``/``npm`` are ``.cmd`` shims that
+    ``CreateProcess`` cannot find (it ignores ``PATHEXT``) or execute directly,
+    which surfaces as ``[WinError 2] 系统找不到指定的文件``. Resolve the command
+    through ``PATHEXT`` (``shutil.which``) and run ``.cmd``/``.bat`` shims via
+    ``cmd /c``. On POSIX we resolve via ``which`` and otherwise pass through
+    unchanged, so behaviour is identical to before.
+    """
+    args = list(args)
+    resolved = shutil.which(command)
+    if os.name == "nt":
+        if resolved and resolved.lower().endswith((".cmd", ".bat")):
+            return ["cmd", "/c", resolved, *args]
+        if resolved:
+            return [resolved, *args]
+        # Last resort: let the shell resolve it (handles shims not on PATHEXT).
+        return ["cmd", "/c", command, *args]
+    return [resolved or command, *args]
 
 
 def _read_server_configs(config_path: Path) -> dict[str, dict]:
