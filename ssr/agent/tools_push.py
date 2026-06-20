@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from ssr.config import Settings
 from ssr.channels.registry import registry
+from ssr.channels.message_parser import parse_and_process_message
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +33,14 @@ def push_notification_impl(settings: Settings, channel_name: str, target: str, m
             if cfg:
                 lark = _import_lark()
                 channel.api = lark.Client.builder().app_id(cfg.app_id).app_secret(cfg.app_secret).build()
-                
-        channel.send_message(target, message)
+        
+        # Parse <ssr_reply_image> / <ssr_reply_files> tags: upload files/images
+        # via channel.send_file / channel.send_image, then send remaining text.
+        # Resolve relative paths against the project directory.
+        base_dir = getattr(settings, "project_dir", None) or str(Path.cwd())
+        clean_text = parse_and_process_message(channel, target, message, base_dir=base_dir)
+        if clean_text:
+            channel.send_message(target, clean_text)
         return f"Notification sent successfully via {channel_name} to {target}."
     except Exception as e:
         return f"ERROR sending notification: {e}"
