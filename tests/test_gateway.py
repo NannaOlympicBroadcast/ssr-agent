@@ -92,7 +92,45 @@ def test_windows_wrapper_is_cmd_with_echo_off(tmp_path, monkeypatch):
     assert ">>" in body and "2>&1" in body
 
 
-def test_windows_interpreter_prefers_pythonw(tmp_path, monkeypatch):
+def test_windows_stats_detects_running_process(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    import types
+
+    def fake_run(cmd, **kw):
+        # The PowerShell process query returns "<pid> <workingset>" lines.
+        if cmd[0] == "powershell":
+            assert "{{" not in cmd[-1]  # braces must NOT be doubled (the old bug)
+            return types.SimpleNamespace(returncode=0, stdout="4242 100\n4243 50\n", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(gw, "_run", fake_run)
+    mgr = gw.WindowsTaskManager()
+    st = mgr.stats(settings, "box")
+    assert st["running"] is True
+    assert st["pid"] == 4242
+    assert st["rss"] == 150  # summed working set
+    assert mgr.status(settings, "box") == "running"
+
+
+def test_windows_status_stopped_vs_not_installed(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    import types
+
+    calls = {"schtasks_rc": 0}
+
+    def fake_run(cmd, **kw):
+        if cmd[0] == "powershell":
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")  # no process
+        if cmd[0] == "schtasks":
+            return types.SimpleNamespace(returncode=calls["schtasks_rc"], stdout="", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(gw, "_run", fake_run)
+    mgr = gw.WindowsTaskManager()
+    calls["schtasks_rc"] = 0   # task exists
+    assert mgr.status(settings, "box") == "stopped"
+    calls["schtasks_rc"] = 1   # task missing
+    assert mgr.status(settings, "box") == "not installed"
     mgr = gw.WindowsTaskManager()
     # When pythonw.exe exists next to the interpreter, it is preferred.
     monkeypatch.setattr(gw.Path, "exists", lambda self: str(self).endswith("pythonw.exe"))

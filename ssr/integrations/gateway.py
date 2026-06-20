@@ -533,37 +533,43 @@ class WindowsTaskManager(ServiceManager):
         self.stop(settings, name)
         return self.start(settings, name)
 
-    def status(self, settings: Settings, name: str) -> str:
-        res = _run(["schtasks", "/Query", "/TN", self._task_name(name), "/FO", "LIST"], shell=True)
-        if res.returncode != 0:
-            return "not installed"
+    def _query_processes(self, name: str) -> list[tuple[int, int]]:
+        """Return ``(pid, working_set_bytes)`` for the process(es) serving *name*.
+
+        Matched by command line so it works even though ``start /b`` detaches the
+        process from the scheduled task (which then reports "Ready", not the live
+        state). Concatenated — not f-string — so PowerShell's ``{ }`` stay intact.
+        """
+        needle = "gateway run " + name
+        script = (
+            "Get-CimInstance Win32_Process "
+            "-Filter \"Name='pythonw.exe' or Name='python.exe'\" | "
+            "Where-Object { $_.CommandLine -like '*" + needle + "*' } | "
+            "ForEach-Object { \"$($_.ProcessId) $($_.WorkingSetSize)\" }"
+        )
+        res = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], shell=True)
+        procs: list[tuple[int, int]] = []
         for line in res.stdout.splitlines():
-            if line.lower().startswith("status:"):
-                return line.split(":", 1)[1].strip() or "unknown"
-        return "installed"
+            parts = line.split()
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                procs.append((int(parts[0]), int(parts[1])))
+        return procs
+
+    def status(self, settings: Settings, name: str) -> str:
+        if self._query_processes(name):
+            return "running"
+        res = _run(["schtasks", "/Query", "/TN", self._task_name(name)], shell=True)
+        return "stopped" if res.returncode == 0 else "not installed"
 
     def stats(self, settings: Settings, name: str) -> dict:
         st = _empty_stats()
-        # Locate the (pythonw/python) process actually serving this gateway by
-        # matching its command line, then sum its WorkingSetSize (bytes).
-        needle = f"gateway run {name}"
-        script = (
-            "Get-CimInstance Win32_Process -Filter "
-            "\"Name='pythonw.exe' or Name='python.exe'\" | "
-            f"Where-Object {{ $_.CommandLine -like '*{needle}*' }} | "
-            "ForEach-Object {{ \"$($_.ProcessId) $($_.WorkingSetSize)\" }}"
-        )
-        res = _run(["powershell", "-NoProfile", "-Command", script], shell=True)
-        total = 0
-        for line in res.stdout.splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[1].isdigit():
-                if st["pid"] is None:
-                    st["pid"] = int(parts[0])
-                total += int(parts[1])
-        if st["pid"] is not None:
+        # Locate the (pythonw/python) process actually serving this gateway and
+        # sum its WorkingSetSize (bytes).
+        procs = self._query_processes(name)
+        if procs:
+            st["pid"] = procs[0][0]
+            st["rss"] = sum(ws for _, ws in procs)
             st["running"] = True
-            st["rss"] = total
             st["source"] = "WorkingSetSize"
         return st
 
