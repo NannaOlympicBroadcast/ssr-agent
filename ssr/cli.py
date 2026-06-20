@@ -205,6 +205,9 @@ def cmd_channel(args, settings: Settings, console: Console) -> int:
                 has_config = load_config(settings) is not None
             elif ch.name == "wechat":
                 has_config = (settings.home / "wechat.json").exists()
+            elif ch.name == "xiaomi":
+                from ssr.integrations.xiaomi import load_config as _load_xiaomi
+                has_config = _load_xiaomi(settings) is not None
             status = "[green]configured[/green]" if has_config else "[yellow]not configured[/yellow]"
             console.print(f"Channel [bold cyan]{ch.name}[/bold cyan]: {status}")
         return 0
@@ -504,12 +507,12 @@ def build_parser() -> argparse.ArgumentParser:
     fsub.add_parser("configure")
     fsub.add_parser("serve", help="run the bot over a WebSocket long connection")
 
-    chan = sub.add_parser("channel", help="configure / run messaging channels (Feishu, WeChat)")
+    chan = sub.add_parser("channel", help="configure / run messaging channels (Feishu, WeChat, XiaoAI)")
     chsub = chan.add_subparsers(dest="channel_action", required=True)
     chcfg = chsub.add_parser("config", aliases=["configure"], help="configure a channel")
-    chcfg.add_argument("channel_name", choices=["feishu", "wechat"])
+    chcfg.add_argument("channel_name", choices=["feishu", "wechat", "xiaomi"])
     chon = chsub.add_parser("on", aliases=["serve"], help="start listening on channel(s)")
-    chon.add_argument("channel_name", choices=["feishu", "wechat", "all"], nargs="?", default="all")
+    chon.add_argument("channel_name", choices=["feishu", "wechat", "xiaomi", "all"], nargs="?", default="all")
     chsub.add_parser("list", help="list registered channels")
     chsub.add_parser("status", help="show channels configuration status")
 
