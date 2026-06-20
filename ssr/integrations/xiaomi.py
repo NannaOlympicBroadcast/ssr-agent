@@ -117,6 +117,38 @@ except ImportError:
         pass
 
 
+def _account_user_agent(device_id: str) -> str:
+    """Stable Mi-smarthome Android User-Agent keyed on the deviceId.
+
+    Mirrors Xiaoai-Claw-Addon's ``buildAccountUserAgent``. A consistent,
+    app-like UA (instead of a random browser string) markedly reduces the
+    security-verification challenges that otherwise invalidate the login when
+    running from a server / new IP.
+    """
+    return (
+        f"Android-7.1.1-1.0.0-ONEPLUS A3010-136-{device_id} "
+        "APP/xiaomi.smarthome APPV/62830"
+    )
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """Whether an exception looks like an expired / invalid login.
+
+    Mirrors the reference's ``isAuthErrorPayload`` (code 3 / 401 / an "auth"
+    message). Stock ``mi_request`` raises ``Exception(f"Error {url}: {resp}")``
+    on auth failure, so we match on the rendered message.
+    """
+    msg = str(exc).lower()
+    return (
+        "401" in msg
+        or "auth" in msg
+        or "login failed" in msg
+        or "unauthorized" in msg
+        or "'code': 3" in msg
+        or '"code": 3' in msg
+    )
+
+
 class CustomMiAccount(MiAccount):
     def __init__(self, session, username, password, token_store=None):
         super().__init__(session, username, password, token_store)
@@ -127,22 +159,20 @@ class CustomMiAccount(MiAccount):
                 self.now_ua = user_agent
 
     async def _serviceLogin(self, uri, data=None):
-        # Keep User-Agent consistent with cached userAgent
-        user_agent = self.token.get("userAgent") if self.token else None
-        if not user_agent:
-            try:
-                user_agent = self.ua.random
-            except Exception:
-                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            if self.token is None:
-                self.token = {}
+        # Use a stable, app-like User-Agent derived from the deviceId so the Mi
+        # passport sees a consistent "device" and stops re-challenging us (the
+        # main cause of the login silently expiring). Keep it cached in the
+        # token store so mi_request's self.now_ua stays in sync.
+        device_id = self.token["deviceId"]
+        user_agent = _account_user_agent(device_id)
+        if self.token.get("userAgent") != user_agent:
             self.token["userAgent"] = user_agent
             if self.token_store:
                 self.token_store.save_token(self.token)
-        
+
         self.now_ua = user_agent
         headers = {"User-Agent": user_agent}
-        cookies = {"sdkVersion": "3.9", "deviceId": self.token["deviceId"]}
+        cookies = {"sdkVersion": "3.9", "deviceId": device_id}
         if "passToken" in self.token:
             cookies["userId"] = self.token["userId"]
             cookies["passToken"] = self.token["passToken"]
@@ -180,11 +210,9 @@ class CustomMiAccount(MiAccount):
                     return "".join(random.sample(string.ascii_letters + string.digits, length))
             self.token["deviceId"] = get_random(16).upper()
 
-        if not self.token.get("userAgent"):
-            try:
-                self.token["userAgent"] = self.ua.random
-            except Exception:
-                self.token["userAgent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        # Always (re)derive the stable Android UA from the deviceId so an old
+        # cached random browser UA can't keep triggering security verification.
+        self.token["userAgent"] = _account_user_agent(self.token["deviceId"])
 
         device_id = self.token.get("deviceId")
         user_agent = self.token.get("userAgent")
@@ -251,15 +279,44 @@ class CustomMiAccount(MiAccount):
             logger.debug("MiAccount login failed: %s", err_msg)
             return False
 
+    def _invalidate_sid(self, sid):
+        """Drop the cached ``(ssecurity, serviceToken)`` for *sid* while keeping
+        the long-lived passToken / deviceId so the next login refreshes silently.
+
+        Mirrors Xiaoai-Claw-Addon's ``invalidateSid``. This is the missing piece
+        that makes re-login actually work: an expired serviceToken must be wiped
+        from the on-disk store, otherwise ``login`` keeps reloading and trusting
+        it (via the early-return below) and the channel never recovers.
+        """
+        if not self.token:
+            self.token = (self.token_store.load_token() if self.token_store else None) or {}
+        removed = self.token.pop(sid, None) is not None
+        if self.token_store:
+            self.token_store.save_token(self.token)
+        if removed:
+            logger.info("invalidated cached serviceToken for sid=%s", sid)
+
     async def mi_request(self, sid, url, data, headers, relogin=True):
-        # Override to ensure that if mi_request sets self.token = None on auth error,
-        # we preserve the deviceId and userAgent!
+        # Stock mi_request's own relogin path sets self.token = None and calls
+        # login(), but our login() then reloads the *just-rejected* serviceToken
+        # from disk and short-circuits — so an expired token can never refresh.
+        # Disable stock's relogin and drive it ourselves: on an auth error, wipe
+        # the stale serviceToken (invalidate_sid) so login() really re-auths via
+        # the passToken, then retry once. This is the fix for the login expiring.
         device_id = self.token.get("deviceId") if self.token else None
         user_agent = self.token.get("userAgent") if self.token else None
+        had_sid_token = bool(self.token and sid in self.token)
         try:
-            return await super().mi_request(sid, url, data, headers, relogin)
-        except Exception:
-            # If mi_request fails and sets self.token = None, restore deviceId and userAgent
+            return await super().mi_request(sid, url, data, headers, relogin=False)
+        except Exception as e:
+            if relogin and had_sid_token and _is_auth_error(e):
+                logger.info("serviceToken for sid=%s rejected (expired); re-logging in…", sid)
+                self._invalidate_sid(sid)
+                if await self.login(sid):
+                    logger.info("re-login OK for sid=%s; retrying request", sid)
+                    return await super().mi_request(sid, url, data, headers, relogin=False)
+                logger.warning("re-login failed for sid=%s", sid)
+            # If the token got cleared along the way, preserve deviceId/userAgent.
             if self.token is None and device_id and user_agent:
                 self.token = {"deviceId": device_id, "userAgent": user_agent}
                 if self.token_store:
