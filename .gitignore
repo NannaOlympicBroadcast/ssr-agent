@@ -13,3 +13,6 @@ venv/
 .ruff_cache/
 node_modules/
 /references/
+
+# transient scheduler lock (session-local cron)
+.claude/scheduled_tasks.lock

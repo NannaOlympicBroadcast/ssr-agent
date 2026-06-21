@@ -1038,7 +1038,25 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _make_output_encoding_safe() -> None:
+    """Stop Unicode output from crashing on a legacy code page (e.g. Windows GBK).
+
+    When stdout is a GBK console or a redirected pipe/file, printing characters
+    like ``✓`` raises ``UnicodeEncodeError`` and aborts the command (seen when
+    pm2 captures ``ssr gateway install`` output). Replacing un-encodable chars
+    keeps the command working instead of crashing.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None and getattr(stream, "encoding", "") and \
+                    stream.encoding.lower() not in ("utf-8", "utf8"):
+                stream.reconfigure(errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _make_output_encoding_safe()
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)

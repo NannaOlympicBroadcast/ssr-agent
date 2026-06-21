@@ -111,6 +111,7 @@ class MCPServer:
         self._tools: list[MCPTool] = []
         self._started = False
         self._closed = False
+        self._job = None  # Windows Job handle: kills the child if we are killed
 
     # ------------------------------------------------------------- lifecycle
     def start(self) -> list[MCPTool]:
@@ -135,6 +136,10 @@ class MCPServer:
         except (OSError, ValueError) as e:
             raise MCPError(f"failed to spawn MCP server '{self.name}': {e}") from e
 
+        # Tie the child's lifetime to ours on Windows so it can't outlive us as
+        # an orphan if we are hard-killed (e.g. pm2 restarting the gateway).
+        self._job = _assign_kill_on_close_job(self._proc.pid)
+
         self._reader = threading.Thread(target=self._read_loop, name=f"mcp-{self.name}", daemon=True)
         self._reader.start()
         self._stderr_reader = threading.Thread(
@@ -142,19 +147,26 @@ class MCPServer:
         )
         self._stderr_reader.start()
 
-        # Handshake.
-        self._request(
-            "initialize",
-            {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "ssr-agent", "version": "0.1.0"},
-            },
-        )
-        self._notify("notifications/initialized")
+        # Handshake + tool enumeration. If any step fails or times out (e.g. a
+        # server that blocks on interactive auth), kill the spawned subprocess
+        # before propagating — otherwise it leaks as an orphan that accumulates
+        # on every agent start / gateway restart.
+        try:
+            self._request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "ssr-agent", "version": "0.1.0"},
+                },
+            )
+            self._notify("notifications/initialized")
 
-        # Enumerate tools.
-        result = self._request("tools/list", {})
+            # Enumerate tools.
+            result = self._request("tools/list", {})
+        except Exception:
+            self.stop()
+            raise
         self._tools = [
             MCPTool(
                 server=self.name,
@@ -179,6 +191,18 @@ class MCPServer:
         result = self._request("tools/call", {"name": tool, "arguments": arguments or {}})
         return _flatten_content(result)
 
+    def _close_job(self) -> None:
+        """Close the Windows Job handle (kills any process still inside it)."""
+        job = self._job
+        self._job = None
+        if job is not None:
+            try:
+                import ctypes
+
+                ctypes.windll.kernel32.CloseHandle(job)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
     def stop(self) -> None:
         """Terminate the subprocess (graceful, then forced)."""
         if self._closed:
@@ -186,6 +210,7 @@ class MCPServer:
         self._closed = True
         proc = self._proc
         if proc is None:
+            self._close_job()
             return
         try:
             if proc.stdin and not proc.stdin.closed:
@@ -202,6 +227,8 @@ class MCPServer:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     pass
+        # Closing the job handle kills anything still alive in it (a last resort).
+        self._close_job()
         # Fail any in-flight requests so callers don't hang.
         with self._lock:
             for slot in self._pending.values():
@@ -649,6 +676,12 @@ class MCPManager:
                     self._tools[tool.qualified_name] = tool
             except Exception as e:  # one bad server must not break the agent
                 _LOGGER.warning("mcp server '%s' failed to start: %s", name, e)
+                # Make sure a server that failed mid-startup doesn't leave its
+                # subprocess running (orphaned).
+                try:
+                    server.stop()
+                except Exception:
+                    pass
         return self.tools
 
     @property
@@ -676,6 +709,86 @@ class MCPManager:
                 server.stop()
             except Exception:  # pragma: no cover - best-effort teardown
                 pass
+
+
+def _assign_kill_on_close_job(pid: int):
+    """Put *pid* in a Windows Job that kills it when the job handle closes.
+
+    The returned handle must be kept alive for as long as the child should live.
+    When our process exits — even via an unclean kill (pm2 restart, crash) — the
+    OS closes the handle, the job's ``KILL_ON_JOB_CLOSE`` limit fires, and the
+    child is terminated instead of leaking as an orphan. No-op off Windows /
+    on any error (best-effort), so behaviour is unchanged where unsupported.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        ULONG_PTR = ctypes.c_size_t
+
+        class _BASIC(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ULONG_PTR),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _IO(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+        class _EXT(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BASIC),
+                ("IoInfo", _IO),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+        JobObjectExtendedLimitInformation = 9
+        PROCESS_SET_QUOTA = 0x0100
+        PROCESS_TERMINATE = 0x0001
+
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+
+        info = _EXT()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            kernel32.CloseHandle(job)
+            return None
+
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        hproc = kernel32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+        if not hproc:
+            kernel32.CloseHandle(job)
+            return None
+        ok = kernel32.AssignProcessToJobObject(job, hproc)
+        kernel32.CloseHandle(hproc)
+        if not ok:
+            kernel32.CloseHandle(job)
+            return None
+        return job
+    except Exception:
+        return None
 
 
 def _resolve_spawn_args(command: str, args: list[str]) -> list[str]:

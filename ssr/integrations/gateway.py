@@ -7,7 +7,11 @@ installed using the platform's native service manager:
 
 * **Linux**  — a systemd *user* unit (``systemctl --user``).
 * **macOS**  — a launchd LaunchAgent plist (``launchctl``).
-* **Windows** — a Scheduled Task that runs at logon (``schtasks``).
+* **Windows** — **pm2**, with pm2 itself installed as a Windows boot service so
+  the gateway survives reboot and restarts on failure. The process is described
+  by a pm2 ecosystem file and persisted with ``pm2 save``; ``pm2-windows-startup``
+  registers pm2 to resurrect the saved processes on boot. If pm2 is not on PATH
+  this falls back to a Scheduled Task that runs at logon (``schtasks``).
 
 Gateway definitions live in ``~/.ssr/gateways.json``; the service simply runs
 ``ssr gateway run <name>``, which loads the record and serves its channel. When
@@ -252,6 +256,44 @@ class _NullManager(ServiceManager):
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+_PM2_PATH_CACHE: list = []  # memoized [path|None] for this process
+
+
+def _find_pm2() -> str | None:
+    """Locate the ``pm2`` executable, even when npm's global bin is off PATH.
+
+    Tries PATH first, then ``%APPDATA%\\npm`` and ``npm config get prefix`` —
+    so a service or otherwise stripped environment still finds the pm2 that the
+    user installed, instead of silently falling back to a Scheduled Task.
+    """
+    if _PM2_PATH_CACHE:
+        return _PM2_PATH_CACHE[0]
+    found = shutil.which("pm2")
+    if not found:
+        candidates = []
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(Path(appdata) / "npm" / "pm2.cmd")
+        try:
+            r = subprocess.run(
+                ["npm", "config", "get", "prefix"],
+                capture_output=True, text=True, shell=True, timeout=15,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                candidates.append(Path(r.stdout.strip()) / "pm2.cmd")
+        except Exception:
+            pass
+        for c in candidates:
+            try:
+                if c.exists():
+                    found = str(c)
+                    break
+            except OSError:
+                pass
+    _PM2_PATH_CACHE.append(found)
+    return found
 
 
 class SystemdManager(ServiceManager):
@@ -574,6 +616,173 @@ class WindowsTaskManager(ServiceManager):
         return st
 
 
+class Pm2WindowsManager(ServiceManager):
+    """Run the gateway under **pm2** on Windows, with pm2 as a boot service.
+
+    pm2 manages the long-running ``ssr gateway run <name>`` process (described by
+    a per-gateway ecosystem file). ``pm2 save`` snapshots the process list and
+    ``pm2-windows-startup`` registers pm2 to resurrect it on boot — i.e. pm2 acts
+    as the Windows service that keeps the gateway alive across reboots.
+    """
+
+    backend = "pm2 (Windows boot service)"
+
+    def available(self) -> bool:
+        return _find_pm2() is not None
+
+    def _pm2(self, args: list[str]) -> subprocess.CompletedProcess:
+        # pm2 on Windows is a ``pm2.cmd`` shim, so it needs the shell. Resolve its
+        # full path because the npm global bin is often missing from a service's
+        # (or otherwise stripped) PATH, which would silently fall back to schtasks.
+        return _run([_find_pm2() or "pm2", *args], shell=True)
+
+    def _app_name(self, name: str) -> str:
+        return service_id(name)
+
+    def _ecosystem_path(self, settings: Settings, name: str) -> Path:
+        d = settings.home / "gateways"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"{name}.pm2.json"
+
+    def _write_ecosystem(self, settings: Settings, gw: Gateway) -> Path:
+        """Write the pm2 ecosystem file describing the gateway process."""
+        log = str(logs_dir(settings) / f"gateway-{gw.name}.log")
+        env = {"SSR_HOME": str(settings.home), **(gw.env or {})}
+        app = {
+            "name": self._app_name(gw.name),
+            # Run ``<python> -m ssr gateway run <name>`` directly (no node wrapper).
+            "script": sys.executable,
+            "args": ["-m", "ssr", "gateway", "run", gw.name],
+            "interpreter": "none",
+            "cwd": gw.cwd or str(Path.home()),
+            "env": env,
+            # Auto-recover from genuine crashes, but guard against a tight restart
+            # loop (pm2 "forking infinite processes") when the gateway exits or
+            # crashes immediately: a start only counts as healthy after 15s, rapid
+            # restarts are capped, and pm2 backs off exponentially between them.
+            "autorestart": True,
+            "min_uptime": "15s",
+            "max_restarts": 5,
+            "exp_backoff_restart_delay": 200,
+            "instances": 1,
+            "exec_mode": "fork",
+            "out_file": log,
+            "error_file": log,
+            "merge_logs": True,
+        }
+        path = self._ecosystem_path(settings, gw.name)
+        path.write_text(json.dumps({"apps": [app]}, ensure_ascii=False, indent=2), "utf-8")
+        return path
+
+    def _ensure_boot_service(self) -> str:
+        """Make pm2 start on Windows boot (install pm2-windows-startup if needed).
+
+        Every step is time-bounded so a slow/offline ``npm`` can never hang
+        ``ssr gateway install`` — it just degrades to printed instructions.
+        """
+        def _try(cmd: list[str], timeout: float) -> subprocess.CompletedProcess | None:
+            try:
+                return _run(cmd, shell=True, timeout=timeout)
+            except Exception:
+                return None
+
+        if shutil.which("pm2-startup"):
+            res = _try(["pm2-startup", "install"], 60)
+            if res is not None and res.returncode == 0:
+                return "已配置 pm2 开机自启（pm2-windows-startup）。"
+            return "[!] pm2-startup install 失败/超时，请手动执行： pm2-startup install"
+        if shutil.which("npm"):
+            ins = _try(["npm", "install", "-g", "pm2-windows-startup"], 180)
+            if ins is not None and ins.returncode == 0 and shutil.which("pm2-startup"):
+                res = _try(["pm2-startup", "install"], 60)
+                if res is not None and res.returncode == 0:
+                    return "已安装并配置 pm2-windows-startup（开机自启）。"
+        return (
+            "[!] 未能自动把 pm2 安装为 Windows 开机服务，请手动执行其一：\n"
+            "    npm install -g pm2-windows-startup && pm2-startup install\n"
+            "    （或用 https://github.com/jessety/pm2-installer 安装为系统服务）"
+        )
+
+    def install(self, settings: Settings, gw: Gateway, start: bool = True) -> str:
+        eco = self._write_ecosystem(settings, gw)
+        # Re-add cleanly so repeated installs don't error on a duplicate name.
+        self._pm2(["delete", self._app_name(gw.name)])
+        res = self._pm2(["start", str(eco)])
+        if res.returncode != 0:
+            return f"[!] pm2 start 失败：{res.stderr.strip() or res.stdout.strip()}"
+        if not start:
+            self._pm2(["stop", self._app_name(gw.name)])
+        self._pm2(["save"])  # persist so pm2 resurrects it on boot
+        boot_msg = self._ensure_boot_service()
+        msg = (
+            f"已通过 pm2 注册网关 {self._app_name(gw.name)}（ecosystem： {eco}）。\n"
+            f"已执行 pm2 save，开机后由 pm2 自动恢复。\n"
+            f"{boot_msg}\n"
+            f"日志： {logs_dir(settings)}\\gateway-{gw.name}.log\n"
+            f"查看日志： pm2 logs {self._app_name(gw.name)}"
+        )
+        if start:
+            msg += "\n已立即启动。"
+        return msg
+
+    def uninstall(self, settings: Settings, name: str) -> str:
+        self._pm2(["delete", self._app_name(name)])
+        self._pm2(["save"])
+        eco = self._ecosystem_path(settings, name)
+        if eco.exists():
+            eco.unlink()
+        # Clean up any legacy scheduled-task wrapper from the schtasks backend.
+        legacy = settings.home / "gateways" / f"{name}.cmd"
+        if legacy.exists():
+            legacy.unlink()
+        return f"已从 pm2 删除 {self._app_name(name)} 并更新 pm2 save。"
+
+    def start(self, settings: Settings, name: str) -> str:
+        res = self._pm2(["start", self._app_name(name)])
+        self._pm2(["save"])
+        return res.stdout.strip() or res.stderr.strip() or f"{self._app_name(name)} 已启动"
+
+    def stop(self, settings: Settings, name: str) -> str:
+        res = self._pm2(["stop", self._app_name(name)])
+        self._pm2(["save"])
+        return res.stdout.strip() or res.stderr.strip() or f"{self._app_name(name)} 已停止"
+
+    def restart(self, settings: Settings, name: str) -> str:
+        res = self._pm2(["restart", self._app_name(name)])
+        return res.stdout.strip() or res.stderr.strip() or f"{self._app_name(name)} 已重启"
+
+    def _find(self, name: str) -> dict | None:
+        res = self._pm2(["jlist"])
+        try:
+            apps = json.loads(res.stdout or "[]")
+        except (json.JSONDecodeError, ValueError):
+            return None
+        target = self._app_name(name)
+        for app in apps if isinstance(apps, list) else []:
+            if app.get("name") == target:
+                return app
+        return None
+
+    def status(self, settings: Settings, name: str) -> str:
+        app = self._find(name)
+        if app is None:
+            return "not installed"
+        return (app.get("pm2_env") or {}).get("status") or "unknown"
+
+    def stats(self, settings: Settings, name: str) -> dict:
+        st = _empty_stats()
+        app = self._find(name)
+        if app:
+            env = app.get("pm2_env") or {}
+            monit = app.get("monit") or {}
+            st["pid"] = app.get("pid") or None
+            st["running"] = env.get("status") == "online"
+            st["rss"] = monit.get("memory")
+            if st["rss"] is not None:
+                st["source"] = "pm2 monit.memory"
+        return st
+
+
 def gather_stats(settings: Settings, name: str, with_cpu: bool = False) -> dict:
     """Normalized live stats for a gateway, enriched with psutil when available.
 
@@ -607,7 +816,10 @@ def get_manager() -> ServiceManager:
     elif system == "Darwin":
         mgr = LaunchdManager()
     elif system == "Windows":
-        mgr = WindowsTaskManager()
+        # Prefer pm2 (as requested); fall back to a Scheduled Task when pm2 is
+        # not installed so the gateway still works out of the box.
+        pm2_mgr = Pm2WindowsManager()
+        mgr = pm2_mgr if pm2_mgr.available() else WindowsTaskManager()
     else:
         mgr = _NullManager()
     return mgr if mgr.available() else _NullManager()

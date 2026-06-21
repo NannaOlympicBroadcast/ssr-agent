@@ -109,6 +109,26 @@ def test_bad_server_is_isolated(settings):
         mgr.shutdown()
 
 
+def test_hung_server_subprocess_is_killed_not_orphaned(settings):
+    # A server that spawns but never speaks JSON-RPC → initialize times out.
+    # The spawned subprocess must be terminated, not left running as an orphan
+    # (which is what caused gateways to "spawn infinite processes").
+    cfg = {"mcpServers": {"hang": {
+        "command": sys.executable,
+        "args": ["-c", "import time; time.sleep(60)"],
+    }}}
+    (settings.home / "mcp.json").write_text(json.dumps(cfg), "utf-8")
+    mgr = MCPManager.from_config(settings.home / "mcp.json", timeout=2)
+    try:
+        tools = mgr.start_all()  # must not raise even though the server hangs
+        assert tools == []
+        proc = mgr._servers["hang"]._proc
+        assert proc is not None
+        assert proc.poll() is not None, "hung MCP subprocess was left as an orphan"
+    finally:
+        mgr.shutdown()
+
+
 # --------------------------------------------------------- SSRAgent wiring
 def test_agent_registers_and_routes_mcp_tools(settings):
     _write_config(settings.home)
