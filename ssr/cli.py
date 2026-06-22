@@ -169,7 +169,20 @@ def cmd_channel(args, settings: Settings, console: Console) -> int:
             return 1
         channel.configure(settings)
         return 0
-        
+
+    if action == "login":
+        if args.channel_name == "xiaomi":
+            from ssr.integrations.xiaomi import interactive_login
+            console.print("[cyan]开始小米登录（如需安全验证，请按提示在浏览器完成）…[/cyan]")
+            result = interactive_login(settings)
+            if result == "OK":
+                console.print("[green]✓ 小米登录成功，登录态已缓存。现在可以启动网关：ssr gateway start <name>[/green]")
+                return 0
+            console.print(f"[red]{result}[/red]")
+            return 1
+        console.print(f"[yellow]'{args.channel_name}' 不支持 login 操作。[/yellow]")
+        return 1
+
     elif action == "on":
         channel_name = args.channel_name
         if channel_name == "all":
@@ -972,6 +985,8 @@ def build_parser() -> argparse.ArgumentParser:
     chcfg.add_argument("channel_name", choices=["feishu", "wechat", "xiaomi"])
     chon = chsub.add_parser("on", aliases=["serve"], help="start listening on channel(s)")
     chon.add_argument("channel_name", choices=["feishu", "wechat", "xiaomi", "all"], nargs="?", default="all")
+    chlogin = chsub.add_parser("login", help="interactively complete login (e.g. XiaoAI safety verification) and cache the token")
+    chlogin.add_argument("channel_name", choices=["xiaomi"])
     chsub.add_parser("list", help="list registered channels")
     chsub.add_parser("status", help="show channels configuration status")
 

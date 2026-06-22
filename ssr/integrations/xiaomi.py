@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -432,6 +433,28 @@ class XiaomiSpeaker:
         if not notif_url:
             raise RuntimeError(reason + "\n\n" + _miot_cache_note())
 
+        # Always persist the (very long) verification URL to a file so it can be
+        # opened without terminal line-wrapping mangling it.
+        url_file = self.settings.home / "xiaomi-verify-url.txt"
+        try:
+            url_file.write_text(notif_url + "\n", "utf-8")
+        except OSError:
+            pass
+
+        # Safety verification needs an interactive browser + Enter. A headless
+        # gateway (pm2 / pythonw / redirected stdin) can't do that — blocking on
+        # input() would hang or raise EOFError. Fail fast with clear guidance so
+        # the user completes verification once in a real terminal (which caches
+        # the passToken), after which the gateway logs in from the cache.
+        if not (sys.stdin is not None and sys.stdin.isatty()):
+            raise XiaomiUnavailable(
+                "小米账号需要【安全验证】，但当前是无终端环境（网关/后台），无法交互完成。\n"
+                "请在【普通终端】里运行一次以完成验证并缓存登录态：\n"
+                "    ssr channel login xiaomi\n"
+                f"或手动打开此文件里的链接完成验证：{url_file}\n"
+                "完成后重启网关即可（之后用缓存的 passToken 登录，不再需要验证）。"
+            )
+
         # If it is a verification/captcha URL, print instructions and wait
         print("\n" + "=" * 80)
         print("小米账号需要【安全验证】才能登录（常见于服务器/新 IP 登录）。")
@@ -447,21 +470,47 @@ class XiaomiSpeaker:
 
         import asyncio
         loop = asyncio.get_running_loop()
-        # Wait for the user to complete verification and press enter
-        await loop.run_in_executor(None, input, "【请在浏览器中完成验证，完成后在此处按回车键(Enter)以继续登录】...")
-
-        print("\n正在重新尝试登录并检测验证状态...")
+        # Wait for the user to complete verification and press enter. isatty()
+        # can lie (it reports True under some wrappers that still have no real
+        # stdin), so also treat EOFError as "no interactive input available" and
+        # fail with the same actionable guidance instead of a bare traceback.
         try:
-            ok = await self._account.login("micoapi")
-            if ok:
-                print("[+] 验证成功，小米账号已成功登录并缓存登录态！")
-                return
-        except Exception as e:
-            logger.debug("尝试登录时出错: %s", e)
+            await loop.run_in_executor(
+                None, input,
+                "【请在浏览器中完成验证，完成后在此处按回车键(Enter)以继续登录】...",
+            )
+        except EOFError:
+            raise XiaomiUnavailable(
+                "需要安全验证，但当前环境无法读取键盘输入（无交互终端）。\n"
+                "请在【普通终端】里运行 `ssr channel login xiaomi` 完成验证，\n"
+                f"或手动打开此文件里的链接完成验证：{url_file}\n"
+                "完成后重启网关即可。"
+            )
 
-        # If it still failed, perform diagnosis and raise error
+        # Mi may take a moment to register the just-completed verification, and a
+        # single in-process retry often misses it. Retry a few times with a short
+        # delay so a correctly-completed verification reliably lands.
+        import asyncio as _asyncio
+        for attempt in range(1, 4):
+            print(f"\n正在重新尝试登录并检测验证状态…(第 {attempt}/3 次)")
+            try:
+                if await self._account.login("micoapi"):
+                    print("[+] 验证成功，小米账号已成功登录并缓存登录态！")
+                    return
+            except Exception as e:
+                logger.debug("尝试登录时出错: %s", e)
+            if attempt < 3:
+                await _asyncio.sleep(3)
+
+        # Still failing after retries — surface actionable guidance.
         notif_url, reason = await _diagnose_login(self._account, self.cfg)
-        raise RuntimeError(reason + "\n\n" + _miot_cache_note())
+        raise RuntimeError(
+            reason
+            + "\n\n仍未通过验证。请确认你在浏览器里【真正完成】了验证（输入短信验证码或在"
+            "“米家/小米账号”App 里点确认），而不仅仅是打开了链接。\n"
+            "完成后再次运行： ssr channel login xiaomi\n\n"
+            + _miot_cache_note()
+        )
 
 
     async def _select_device(self) -> SpeakerDevice:
@@ -680,3 +729,41 @@ def _chunk_for_tts(text: str, limit: int = 240) -> list[str]:
     if buf.strip():
         chunks.append(buf.strip())
     return chunks or [text[:limit]]
+
+
+def interactive_login(settings: Settings) -> str:
+    """Run the Mi login interactively (TTY) so safety verification can complete.
+
+    Returns "OK" once a passToken is cached, otherwise an error string. Intended
+    for ``ssr channel login xiaomi`` — run it once in a real terminal; the cached
+    token then lets the headless gateway log in without re-verification.
+    """
+    import asyncio
+
+    cfg = load_config(settings)
+    if cfg is None or not cfg.account or not cfg.password:
+        return "小爱音箱未配置，请先运行: ssr channel config xiaomi"
+
+    speaker = XiaomiSpeaker(settings, cfg)
+
+    async def _run() -> None:
+        try:
+            await speaker.connect()
+        finally:
+            await speaker.close()
+
+    err: str | None = None
+    try:
+        asyncio.run(_run())
+    except Exception as e:  # device selection may fail even if login succeeded
+        err = str(e)
+
+    # Success is defined by a cached passToken (login completed), regardless of
+    # whether the later device-selection step succeeded.
+    try:
+        tok = json.loads(token_path(settings).read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        tok = {}
+    if tok.get("passToken"):
+        return "OK"
+    return "FAIL: " + (err or "登录未完成（未获得 passToken）")
