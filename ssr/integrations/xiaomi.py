@@ -612,27 +612,131 @@ class XiaomiSpeaker:
     async def latest_ask(self) -> tuple[str, str] | None:
         """Return ``(request_id, question)`` for the most recent spoken query.
 
-        Picks the message with the greatest ``timestamp_ms`` so the dedup id in
-        the poll loop always tracks the newest utterance. Errors are logged (not
-        swallowed) so a misconfigured/expired session is visible in the logs.
+        Tries the conversation-history HTTP API first (reliable across speakers,
+        incl. LX04), then falls back to the ubus ``nlp_result_get`` (which returns
+        an empty result on many devices).
         """
         assert self.device is not None
+        ask = await self._conversation_ask()
+        if ask is not None:
+            return ask
+        return await self._nlp_result_ask()
+
+    async def _conversation_ask(self, _retried: bool = False) -> tuple[str, str] | None:
+        """Latest query via the ``userprofile.mina.mi.com`` conversation history.
+
+        Sent directly (not via mi_request) because this endpoint additionally
+        requires a ``deviceId`` cookie, which mi_request does not include.
+        """
+        import time as _t
+
+        acc = self._account
+        # Ensure we have a serviceToken for micoapi.
+        if not (acc.token and "micoapi" in acc.token):
+            try:
+                if not await acc.login("micoapi"):
+                    return None
+            except Exception:
+                return None
+
         try:
-            messages = await self._mina.get_latest_ask(self.device.device_id) or []
-        except Exception:
-            logger.exception("get_latest_ask() failed for device %s", self.device.device_id)
+            service_token = acc.token["micoapi"][1]
+            user_id = str(acc.token["userId"])
+            device_id = acc.token["deviceId"]
+        except (KeyError, IndexError, TypeError):
             return None
 
-        logger.debug("get_latest_ask -> %d message(s): %s", len(messages), messages)
+        hardware = self.device.hardware or self.cfg.hardware or ""
+        ts = int(_t.time() * 1000)
+        url = (
+            "https://userprofile.mina.mi.com/device_profile/v2/conversation"
+            f"?source=dialogu&hardware={hardware}&timestamp={ts}&limit=2"
+        )
+        cookies = {"userId": user_id, "serviceToken": service_token, "deviceId": device_id}
+        headers = {"User-Agent": getattr(acc, "now_ua", "")}
+        try:
+            async with acc.session.get(url, cookies=cookies, headers=headers) as r:
+                resp = await r.json(content_type=None)
+        except Exception as e:
+            logger.debug("conversation API request failed (%s); ubus fallback", e)
+            return None
+
+        code = resp.get("code") if isinstance(resp, dict) else None
+        if code != 0:
+            msg = (resp or {}).get("message", "")
+            # Refresh an expired serviceToken once, then retry.
+            if not _retried and ("auth" in str(msg).lower() or code in (401, 2)):
+                logger.info("conversation API auth error (%s); re-logging in…", msg)
+                try:
+                    acc._invalidate_sid("micoapi")
+                    if await acc.login("micoapi"):
+                        return await self._conversation_ask(_retried=True)
+                except Exception:
+                    pass
+            logger.debug("conversation API code=%s msg=%s", code, msg)
+            return None
+
+        raw = resp.get("data")
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("conversation API: data not JSON: %r", raw)
+            return None
+        records = (data or {}).get("records") or []
+        logger.debug("conversation API -> %d record(s)", len(records))
+        best: tuple[int, str, str] | None = None
+        for rec in records:
+            q = (rec.get("query") or "").strip()
+            t = int(rec.get("time") or 0)
+            rid = str(rec.get("requestId") or rec.get("time") or t)
+            if q and (best is None or t >= best[0]):
+                best = (t, rid, q)
+        if best is None:
+            return None
+        return (best[1], best[2])
+
+    async def _nlp_result_ask(self) -> tuple[str, str] | None:
+        # Call the ubus directly (instead of stock get_latest_ask) so we can log
+        # exactly what the speaker returns: the stock helper silently returns []
+        # when ``data.code != 0`` and asserts ``len(answer) == 1``, hiding both
+        # "device doesn't support nlp_result_get" and "no recent query".
+        try:
+            raw = await self._mina.ubus_request(
+                self.device.device_id, "nlp_result_get", "mibrain", {}
+            )
+        except Exception:
+            logger.exception("nlp_result_get ubus failed for %s", self.device.device_id)
+            return None
+
+        data = (raw or {}).get("data") or {}
+        code = data.get("code")
+        if code != 0:
+            logger.debug(
+                "nlp_result_get -> data.code=%s (≠0, speaker has no result / unsupported) raw=%s",
+                code, raw,
+            )
+            return None
+        try:
+            result = (json.loads(data.get("info") or "{}") or {}).get("result") or []
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("nlp_result_get -> could not parse data.info: %r", data.get("info"))
+            return None
+
+        logger.debug("nlp_result_get -> %d item(s)", len(result))
         best: tuple[int, str, str] | None = None  # (timestamp_ms, request_id, question)
-        for msg in messages:
-            ts = int(msg.get("timestamp_ms") or 0)
-            rid = str(msg.get("request_id") or ts)
-            answers = (msg.get("response") or {}).get("answer") or []
-            for ans in answers:
-                question = (ans.get("question") or "").strip()
-                if question and (best is None or ts >= best[0]):
-                    best = (ts, rid, question)
+        for item in result:
+            if "nlp" not in item:
+                continue
+            try:
+                nlp = json.loads(item["nlp"])
+                ts = int(nlp["meta"]["timestamp"])
+                rid = str(nlp["meta"]["request_id"])
+                for ans in nlp.get("response", {}).get("answer", []) or []:
+                    q = ((ans.get("intention") or {}).get("query") or "").strip()
+                    if q and (best is None or ts >= best[0]):
+                        best = (ts, rid, q)
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                logger.debug("nlp_result_get -> skipping unparseable item: %r", item)
         if best is None:
             return None
         return (best[1], best[2])
