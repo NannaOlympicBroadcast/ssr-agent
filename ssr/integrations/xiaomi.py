@@ -731,18 +731,63 @@ def _chunk_for_tts(text: str, limit: int = 240) -> list[str]:
     return chunks or [text[:limit]]
 
 
-def interactive_login(settings: Settings) -> str:
+def import_pass_token(settings: Settings, pass_token: str, user_id: str) -> None:
+    """Seed the token store with a browser-obtained passToken + userId.
+
+    This bypasses password login + safety verification entirely: a passToken is
+    the account-level long-lived credential, so the next login exchanges it for a
+    serviceToken without any ``securityStatus`` challenge. Get them from a logged
+    in browser at i.mi.com / account.xiaomi.com (DevTools → Cookies → passToken,
+    userId). The existing deviceId/userAgent are preserved.
+    """
+    tp = token_path(settings)
+    try:
+        tok = json.loads(tp.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        tok = {}
+    if not tok.get("deviceId"):
+        try:
+            from miservice.miaccount import get_random
+            tok["deviceId"] = get_random(16).upper()
+        except Exception:
+            tok["deviceId"] = "0123456789ABCDEF"
+    tok["userAgent"] = _account_user_agent(tok["deviceId"])
+    tok["passToken"] = pass_token.strip()
+    tok["userId"] = str(user_id).strip()
+    # Drop any stale per-sid serviceToken so login re-derives it from passToken.
+    tok.pop("micoapi", None)
+    tp.parent.mkdir(parents=True, exist_ok=True)
+    tp.write_text(json.dumps(tok, ensure_ascii=False, indent=2), "utf-8")
+    try:
+        tp.chmod(0o600)
+    except OSError:
+        pass
+
+
+def interactive_login(
+    settings: Settings, pass_token: str | None = None, user_id: str | None = None
+) -> str:
     """Run the Mi login interactively (TTY) so safety verification can complete.
 
     Returns "OK" once a passToken is cached, otherwise an error string. Intended
     for ``ssr channel login xiaomi`` — run it once in a real terminal; the cached
     token then lets the headless gateway log in without re-verification.
+
+    If ``pass_token``/``user_id`` are given, they are imported first (bypassing
+    password login + safety verification) and then validated by logging in.
     """
     import asyncio
 
+    if pass_token:
+        if not user_id:
+            return "提供 --pass-token 时必须同时提供 --user-id（两者都在浏览器 Cookie 里）。"
+        import_pass_token(settings, pass_token, user_id)
+
     cfg = load_config(settings)
-    if cfg is None or not cfg.account or not cfg.password:
+    if cfg is None or not cfg.account:
         return "小爱音箱未配置，请先运行: ssr channel config xiaomi"
+    if not cfg.password and not pass_token:
+        return "未配置密码。请运行 ssr channel config xiaomi，或用 --pass-token 登录。"
 
     speaker = XiaomiSpeaker(settings, cfg)
 

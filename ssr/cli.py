@@ -173,8 +173,13 @@ def cmd_channel(args, settings: Settings, console: Console) -> int:
     if action == "login":
         if args.channel_name == "xiaomi":
             from ssr.integrations.xiaomi import interactive_login
-            console.print("[cyan]开始小米登录（如需安全验证，请按提示在浏览器完成）…[/cyan]")
-            result = interactive_login(settings)
+            pass_token = getattr(args, "pass_token", None)
+            user_id = getattr(args, "user_id", None)
+            if pass_token:
+                console.print("[cyan]使用 passToken 登录（跳过密码与安全验证）…[/cyan]")
+            else:
+                console.print("[cyan]开始小米登录（如需安全验证，请按提示在浏览器完成）…[/cyan]")
+            result = interactive_login(settings, pass_token=pass_token, user_id=user_id)
             if result == "OK":
                 console.print("[green]✓ 小米登录成功，登录态已缓存。现在可以启动网关：ssr gateway start <name>[/green]")
                 return 0
@@ -987,6 +992,10 @@ def build_parser() -> argparse.ArgumentParser:
     chon.add_argument("channel_name", choices=["feishu", "wechat", "xiaomi", "all"], nargs="?", default="all")
     chlogin = chsub.add_parser("login", help="interactively complete login (e.g. XiaoAI safety verification) and cache the token")
     chlogin.add_argument("channel_name", choices=["xiaomi"])
+    chlogin.add_argument("--pass-token", dest="pass_token",
+                         help="bypass password+verification: passToken cookie from a logged-in browser (i.mi.com)")
+    chlogin.add_argument("--user-id", dest="user_id",
+                         help="userId cookie from the same browser (required with --pass-token)")
     chsub.add_parser("list", help="list registered channels")
     chsub.add_parser("status", help="show channels configuration status")
 
