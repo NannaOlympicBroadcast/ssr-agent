@@ -172,14 +172,18 @@ def cmd_channel(args, settings: Settings, console: Console) -> int:
 
     if action == "login":
         if args.channel_name == "xiaomi":
-            from ssr.integrations.xiaomi import interactive_login
+            from ssr.integrations.xiaomi import browser_login, interactive_login
             pass_token = getattr(args, "pass_token", None)
             user_id = getattr(args, "user_id", None)
-            if pass_token:
-                console.print("[cyan]使用 passToken 登录（跳过密码与安全验证）…[/cyan]")
+            if getattr(args, "browser", False):
+                console.print("[cyan]通过 Chrome DevTools 打开浏览器登录，登录后自动获取 token…[/cyan]")
+                result = browser_login(settings, timeout=getattr(args, "timeout", 300.0))
             else:
-                console.print("[cyan]开始小米登录（如需安全验证，请按提示在浏览器完成）…[/cyan]")
-            result = interactive_login(settings, pass_token=pass_token, user_id=user_id)
+                if pass_token:
+                    console.print("[cyan]使用 passToken 登录（跳过密码与安全验证）…[/cyan]")
+                else:
+                    console.print("[cyan]开始小米登录（如需安全验证，请按提示在浏览器完成）…[/cyan]")
+                result = interactive_login(settings, pass_token=pass_token, user_id=user_id)
             if result == "OK":
                 console.print("[green]✓ 小米登录成功，登录态已缓存。现在可以启动网关：ssr gateway start <name>[/green]")
                 return 0
@@ -996,6 +1000,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="bypass password+verification: passToken cookie from a logged-in browser (i.mi.com)")
     chlogin.add_argument("--user-id", dest="user_id",
                          help="userId cookie from the same browser (required with --pass-token)")
+    chlogin.add_argument("--browser", action="store_true",
+                         help="open a real Chrome to log in, then auto-harvest the token via DevTools (headed env)")
+    chlogin.add_argument("--timeout", type=float, default=300.0,
+                         help="seconds to wait for browser login (with --browser)")
     chsub.add_parser("list", help="list registered channels")
     chsub.add_parser("status", help="show channels configuration status")
 

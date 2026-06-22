@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -812,3 +813,161 @@ def interactive_login(
     if tok.get("passToken"):
         return "OK"
     return "FAIL: " + (err or "登录未完成（未获得 passToken）")
+
+
+# --------------------------------------------------- headed browser CDP login
+def _find_browser() -> str | None:
+    """Locate a Chrome/Edge/Chromium executable to drive via DevTools Protocol."""
+    import os
+    import shutil
+
+    for n in ("chrome", "google-chrome", "google-chrome-stable", "chromium",
+              "chromium-browser", "msedge"):
+        p = shutil.which(n)
+        if p:
+            return p
+    candidates: list[Path] = []
+    if sys.platform == "win32":
+        for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"),
+                     os.environ.get("LOCALAPPDATA")):
+            if base:
+                candidates.append(Path(base) / "Google/Chrome/Application/chrome.exe")
+                candidates.append(Path(base) / "Microsoft/Edge/Application/msedge.exe")
+    elif sys.platform == "darwin":
+        candidates += [
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+            Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        ]
+    for c in candidates:
+        try:
+            if c.exists():
+                return str(c)
+        except OSError:
+            pass
+    return None
+
+
+def _cdp_get_all_cookies(port: int) -> list[dict]:
+    """All browser cookies via CDP ``Storage.getCookies`` (includes httpOnly)."""
+    import asyncio
+
+    import httpx
+
+    try:
+        info = httpx.get(f"http://127.0.0.1:{port}/json/version", timeout=3.0).json()
+    except Exception:
+        return []
+    ws_url = info.get("webSocketDebuggerUrl")
+    if not ws_url:
+        return []
+
+    async def _go() -> list[dict]:
+        import websockets
+
+        async with websockets.connect(ws_url, max_size=None) as ws:
+            await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
+            for _ in range(50):
+                msg = json.loads(await ws.recv())
+                if msg.get("id") == 1:
+                    return msg.get("result", {}).get("cookies", []) or []
+            return []
+
+    try:
+        return asyncio.run(_go())
+    except Exception:
+        return []
+
+
+def _pick_cookie(cookies: list[dict], name: str) -> str | None:
+    """Value of cookie ``name`` (preferring a mi.com-scoped one), or None."""
+    matches = [c for c in cookies if c.get("name") == name and c.get("value")]
+    if not matches:
+        return None
+    matches.sort(key=lambda c: "mi.com" not in (c.get("domain") or ""))
+    return matches[0]["value"]
+
+
+def _attempt_login(settings: Settings) -> bool:
+    """Try a full login with whatever is cached; True if a serviceToken results."""
+    import asyncio
+
+    cfg = load_config(settings)
+    if cfg is None or not cfg.account:
+        return False
+    speaker = XiaomiSpeaker(settings, cfg)
+
+    async def _run() -> None:
+        try:
+            await speaker.connect()
+        finally:
+            await speaker.close()
+
+    try:
+        asyncio.run(_run())
+    except Exception:
+        pass
+    try:
+        tok = json.loads(token_path(settings).read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        tok = {}
+    return "micoapi" in tok  # serviceToken obtained → real success
+
+
+def browser_login(settings: Settings, timeout: float = 300.0, port: int = 9222) -> str:
+    """Open a headed Chrome at the Mi login page, wait for the user to sign in,
+    then harvest passToken+userId from the browser via the DevTools Protocol.
+
+    A real browser can complete the safety verification (SMS / app confirm) that
+    the headless password flow cannot; we read the resulting (httpOnly) passToken
+    cookie via CDP ``Storage.getCookies`` and cache it. Returns "OK" on success.
+    """
+    import time as _time
+
+    browser = _find_browser()
+    if not browser:
+        return ("未找到 Chrome/Edge/Chromium。请安装其一，或改用 "
+                "`ssr channel login xiaomi --pass-token <...> --user-id <...>`。")
+
+    profile = settings.home / "xiaomi-chrome-profile"
+    profile.mkdir(parents=True, exist_ok=True)
+    login_url = "https://account.xiaomi.com/pass/serviceLogin?sid=micoapi&_locale=zh_CN"
+    args = [
+        browser,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--new-window",
+        login_url,
+    ]
+    print("正在打开浏览器，请在其中登录小米账号（可完成短信/设备安全验证）。")
+    print("登录成功后会自动从浏览器读取 token，无需手动复制。")
+    try:
+        proc = subprocess.Popen(args)
+    except OSError as e:
+        return f"无法启动浏览器：{e}"
+
+    try:
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            if proc.poll() is not None:
+                return "浏览器已被关闭，未获取到 token。"
+            cookies = _cdp_get_all_cookies(port)
+            pass_token = _pick_cookie(cookies, "passToken")
+            user_id = _pick_cookie(cookies, "userId")
+            if pass_token and user_id:
+                import_pass_token(settings, pass_token, user_id)
+                print("[+] 已从浏览器获取 passToken，正在验证登录…")
+                ok = _attempt_login(settings)
+                return "OK" if ok else (
+                    "已获取并缓存 passToken；登录态已写入 "
+                    f"{token_path(settings)}。可启动网关验证设备。"
+                )
+            _time.sleep(2)
+        return "TIMEOUT: 超时未检测到登录（未读到 passToken/userId）。"
+    finally:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
