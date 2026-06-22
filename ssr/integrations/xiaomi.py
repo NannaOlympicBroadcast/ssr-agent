@@ -41,6 +41,7 @@ class XiaomiConfig:
     hardware: str = ""              # e.g. L05C
     wake_word: str = ""             # optional: only forward queries containing it
     default_cwd: str = ""           # starting working directory (not a hard limit)
+    tts_command: str = ""           # MiIO play-text action "siid-aiid" (e.g. "5-1"); auto by hardware if empty
     # Used by the bundled ``miot`` plugin's ${xiaomi.*} placeholders:
     miot_mcp_command: str = ""
 
@@ -391,9 +392,9 @@ def _import_miservice():
         import aiohttp  # noqa: F401
     except ImportError:
         missing.append("aiohttp")
-    MiAccount = MiNAService = MiTokenStore = None
+    MiAccount = MiNAService = MiTokenStore = MiIOService = None
     try:
-        from miservice import MiAccount, MiNAService, MiTokenStore  # noqa: F401
+        from miservice import MiAccount, MiIOService, MiNAService, MiTokenStore  # noqa: F401
     except ImportError:
         missing.append("miservice_fork")
     if missing:  # pragma: no cover - core deps, only if the env is broken
@@ -403,7 +404,18 @@ def _import_miservice():
             "  pip install -e .   # 或： pip install miservice_fork aiohttp\n"
             "注意：是 'miservice_fork'（不是同名的 'miservice'），它提供 MiTokenStore。"
         )
-    return CustomMiAccount, MiNAService, MiTokenStore
+    return CustomMiAccount, MiNAService, MiTokenStore, MiIOService
+
+
+# Per-hardware MiIO play-text action (siid, aiid). Used when MiNA text_to_speech
+# silently no-ops on a speaker (it acks code 0 but never speaks). Values mirror
+# the community xiaogpt hardware map.
+_TTS_MIIO_COMMANDS = {
+    "LX04": (5, 1), "LX06": (5, 1), "LX01": (5, 1), "LX5A": (5, 1), "LX05A": (5, 1),
+    "L05B": (5, 3), "L05C": (5, 3), "S12A": (5, 1), "S12": (5, 1), "L06A": (5, 1),
+    "L07A": (5, 1), "L09A": (3, 1), "L15A": (7, 3), "L17A": (7, 3), "X08E": (7, 3),
+    "X10A": (7, 3), "X6A": (7, 3), "X08C": (7, 3),
+}
 
 
 @dataclass
@@ -423,6 +435,7 @@ class XiaomiSpeaker:
         self._session = None
         self._account = None
         self._mina = None
+        self._miio = None
         self.device: SpeakerDevice | None = None
 
     async def __aenter__(self) -> "XiaomiSpeaker":
@@ -435,7 +448,7 @@ class XiaomiSpeaker:
     async def connect(self) -> None:
         import aiohttp
 
-        MiAccount, MiNAService, MiTokenStore = _import_miservice()
+        MiAccount, MiNAService, MiTokenStore, MiIOService = _import_miservice()
         tok = token_path(self.settings)
         logger.info(
             "connecting to Mi cloud: account=%s region=%s token_store=%s",
@@ -452,6 +465,7 @@ class XiaomiSpeaker:
                 MiTokenStore(str(tok)),
             )
             self._mina = MiNAService(self._account)
+            self._miio = MiIOService(self._account)
             logger.info("Mi account/MiNAService initialised; logging in…")
             await self._login_or_diagnose()
             logger.info("Mi login OK; selecting speaker…")
@@ -747,20 +761,70 @@ class XiaomiSpeaker:
             return None
         return (best[1], best[2])
 
+    def _tts_command(self) -> tuple[int, int] | None:
+        """The MiIO play-text (siid, aiid) for this speaker, or None."""
+        if self.cfg.tts_command:
+            try:
+                siid, aiid = self.cfg.tts_command.split("-")
+                return (int(siid), int(aiid))
+            except (ValueError, AttributeError):
+                logger.warning("invalid tts_command %r (expected 'siid-aiid')", self.cfg.tts_command)
+        hw = (self.device.hardware if self.device else "") or self.cfg.hardware or ""
+        return _TTS_MIIO_COMMANDS.get(hw.upper())
+
+    async def _speak_chunk(self, text: str) -> bool:
+        """Speak one chunk. Prefer MiIO play-text (reliable where MiNA's
+        text_to_speech acks code 0 but never actually speaks), fall back to MiNA.
+        """
+        cmd = self._tts_command()
+        did = self.device.did if self.device else ""
+        if cmd and did and self._miio is not None:
+            try:
+                code = await self._miio.miot_action(did, list(cmd), [text])
+                if code == 0:
+                    logger.info("MiIO play-text ok (%d chars) via siid-aiid=%s", len(text), cmd)
+                    return True
+                logger.warning("MiIO play-text code=%s (siid-aiid=%s); trying MiNA TTS", code, cmd)
+            except Exception:
+                logger.exception("MiIO play-text failed; trying MiNA TTS")
+        try:
+            result = await self._mina.text_to_speech(self.device.device_id, text)
+            logger.info("MiNA TTS ok (%d chars), result=%s", len(text), result)
+            return True
+        except Exception:
+            logger.exception("MiNA TTS failed")
+            return False
+
+    async def _pause_playback(self) -> None:
+        """Pause any current media playback so the TTS reply is actually heard.
+
+        When the speaker is mid-playback (status=playing, e.g. XiaoAI just
+        answered or is playing content) a TTS command is accepted (code 0) but
+        never spoken. Pausing first frees the audio channel.
+        """
+        try:
+            await self._mina.player_pause(self.device.device_id)
+        except Exception:
+            logger.debug("player_pause failed (ignored)", exc_info=True)
+
     async def speak(self, text: str) -> None:
+        import asyncio
+
         assert self.device is not None
         if not text:
             return
         # XiaoAI TTS rejects very long strings; chunk on sentence boundaries.
         chunks = _chunk_for_tts(text)
-        logger.info("speaking %d chunk(s) to %s", len(chunks), self.device.device_id)
+        logger.info(
+            "speaking %d chunk(s) to %s (hardware=%s, tts_cmd=%s)",
+            len(chunks), self.device.device_id, self.device.hardware, self._tts_command(),
+        )
+        # Stop whatever the speaker is currently playing, then speak.
+        await self._pause_playback()
+        await asyncio.sleep(0.4)
         for i, chunk in enumerate(chunks):
-            try:
-                result = await self._mina.text_to_speech(self.device.device_id, chunk)
-                logger.info("  TTS chunk %d/%d ok (%d chars), result=%s",
-                            i + 1, len(chunks), len(chunk), result)
-            except Exception:
-                logger.exception("  TTS chunk %d/%d failed; aborting remaining chunks", i + 1, len(chunks))
+            if not await self._speak_chunk(chunk):
+                logger.warning("  TTS chunk %d/%d failed; aborting remaining chunks", i + 1, len(chunks))
                 break
 
 
