@@ -29,25 +29,38 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   `server.BusServer` (`ssr bus serve`) brokers events between peers over
   WebSocket; `client.BusClient` is the synchronous programmatic client for
   external programs / other agents, and `client.RemoteBusBridge` bridges an
-  agent's built-in bus to a remote server (set `SSR_BUS_URL`). Agent tools:
-  `bus_publish`, `bus_subscribe` (wakes the agent on matching events),
-  `bus_wait`, `bus_unsubscribe`, `bus_listeners`, `bus_history`; REPL `/bus`,
-  CLI `ssr bus <serve|send|listen|status>`.
+  agent's built-in bus to a remote server. Every `ssr` main process **auto-starts
+  a non-blocking embedded bus server** (`SSR_BUS_SERVE`, default on; reuses an
+  existing one on port conflict) and bridges to it; set `SSR_BUS_API_KEY` to
+  require auth (handshake `bus.auth`), plus `SSR_BUS_HOST`/`SSR_BUS_PORT`/
+  `SSR_BUS_URL`. Agent tools: `bus_publish`, `bus_subscribe` (wakes the agent on
+  matching events — even when idle), `bus_wait` (interruptible by `/stop`),
+  `bus_unsubscribe`, `bus_listeners`, `bus_history`; REPL `/bus`, CLI
+  `ssr bus <serve|send|listen|status>` (all accept `--api-key`).
 - `ssr/plugins.py` + `ssr/builtin_plugins/` — bundled *plugins* (Claude-Code
   `.claude-plugin/plugin.json` + `.mcp.json` format) that contribute MCP servers,
   merged with `~/.ssr/mcp.json`. Ships `chrome-devtools`; supports shared
   credentials via `${namespace.key}` → `~/.ssr/<namespace>.json` (e.g. the `miot`
   plugin shares the `xiaomi` channel's credentials).
 - `ssr/channels/` — IM/voice channels: `feishu`, `wechat`, and `xiaomi` (XiaoAI
-  speaker: polls the Mi cloud for speech and replies via TTS). Channel slash
-  commands stay in sync with the CLI; channels are not pinned to a default dir.
+  speaker: polls the Mi cloud **conversation-history API** for speech and replies
+  via TTS — pausing playback first, and using the MiIO `play-text` action where
+  MiNA `text_to_speech` silently no-ops). `ssr channel login xiaomi` does a
+  one-time interactive login that caches the passToken (so a headless gateway can
+  log in without re-verification): `--browser` opens a real Chrome and harvests
+  the token via the DevTools Protocol; `--pass-token/--user-id` import it from
+  browser cookies. Channel slash commands stay in sync with the CLI; channels are
+  not pinned to a default dir.
 - `ssr/integrations/` — `pm2` background tasks, `feishu` (Lark) bot, `acp`
   (Agent Client Protocol) server, `mcp_client` (spawns the MCP servers in
   `~/.ssr/mcp.json` and speaks JSON-RPC over stdio; tools are exposed to the
-  model as `mcp__<server>__<tool>` and routed by `SSRAgent`), `gateway` (`ssr gateway` —
-  installs a channel-bound instance as a **system service** via the native
-  manager per OS: systemd user unit / launchd plist / Windows scheduled task;
-  records in `~/.ssr/gateways.json`, the service runs `ssr gateway run <name>`).
+  model as `mcp__<server>__<tool>` and routed by `SSRAgent`; failed/timed-out MCP
+  servers are killed (no orphan leak) and children are tied to the parent via a
+  Windows Job object), `gateway` (`ssr gateway` — installs a channel-bound
+  instance as a **system service** per OS: systemd user unit / launchd plist /
+  **Windows pm2** (ecosystem file + restart guards + `pm2-windows-startup`;
+  falls back to a scheduled task if pm2 is absent); records in
+  `~/.ssr/gateways.json`, the service runs `ssr gateway run <name>`).
 - Container deployment: `Dockerfile` + `docker-compose.yml` (`SSR_HOME=/data/.ssr`
   on the `ssr-data` volume; entrypoint runs `ssr init` then `ssr <command>`).
 

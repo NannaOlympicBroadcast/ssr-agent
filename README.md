@@ -76,8 +76,10 @@ ssr channel config feishu  # configure Feishu channel (alias: configure)
 ssr channel on feishu      # start listening on Feishu channel (alias: serve)
 ssr channel config wechat  # configure WeChat channel (scanning QR code to log in; network-resilient status checks handling wait, scanned, expired, canceled, timeout, and customized error message responses; press Ctrl+C to cancel)
 ssr channel on wechat      # start listening on WeChat channel (with dynamic X-WECHAT-UIN headers, full base_info / client_id payload alignment, incoming image message decryption support, auto-exit on session timeout, robust media/file send support, and verbose logging for API calls)
-ssr channel config xiaomi  # configure Xiaomi speaker channel (shares credentials with the miot plugin)
-ssr channel on xiaomi      # start listening on Xiaomi speaker channel (ASR query polling and TTS reply; supports interactive security verification using original URLs directly; ensure copying the entire URL without extra spaces/newlines to avoid 404 errors; 401 page redirection in browser is expected—simply return and press Enter to continue)
+ssr channel config xiaomi          # configure Xiaomi speaker channel (shares credentials with the miot plugin)
+ssr channel login xiaomi --browser # open a real Chrome, log in, auto-harvest the token via DevTools (handles Mi safety verification)
+ssr channel login xiaomi --pass-token <PT> --user-id <UID>  # or import passToken+userId from a logged-in browser (i.mi.com cookies)
+ssr channel on xiaomi              # start listening on Xiaomi speaker channel (polls cloud conversation history; replies via TTS, pausing playback first so the reply is audible)
 
 # Multi-Model configurations
 ssr models config        # interactively configure LLM models (Gemini, Anthropic, OpenAI)
@@ -132,7 +134,10 @@ command works on all three platforms, using each one's native service manager:
 | --- | --- | --- |
 | Linux | systemd **user** unit (`systemctl --user`) | `~/.config/systemd/user/ssr-gateway-<name>.service` |
 | macOS | launchd LaunchAgent (`launchctl`) | `~/Library/LaunchAgents/com.ssr.gateway.<name>.plist` |
-| Windows | Scheduled Task at logon (`schtasks`) | task `ssr-gateway-<name>` + `~/.ssr/gateways/<name>.cmd` |
+| Windows | **pm2** (with `pm2-windows-startup` for boot) | pm2 app `ssr-gateway-<name>` + `~/.ssr/gateways/<name>.pm2.json` |
+
+On Windows, if pm2 is not installed it falls back to a Scheduled Task at logon
+(`schtasks`, `~/.ssr/gateways/<name>.cmd`).
 
 ```bash
 # Configure the channel once, then install it as a service:
@@ -149,9 +154,10 @@ ssr gateway uninstall name        # stop, remove the unit, drop the record
 ```
 
 Memory is read per platform: systemd's cgroup `MemoryCurrent` on Linux, `ps`
-RSS on macOS, and the process `WorkingSetSize` (matched by command line) on
-Windows. Install [`psutil`](https://pypi.org/project/psutil/) for thread counts
-and `--cpu` sampling (optional — it degrades gracefully without it).
+RSS on macOS, and pm2's `monit.memory` (or the process `WorkingSetSize` under
+the Scheduled-Task fallback) on Windows. Install
+[`psutil`](https://pypi.org/project/psutil/) for thread counts and `--cpu`
+sampling (optional — it degrades gracefully without it).
 
 Gateway definitions are stored in `~/.ssr/gateways.json`; the installed service
 simply runs `ssr gateway run <name>`, which loads the record and serves its
@@ -161,9 +167,11 @@ installed with, and pins `SSR_HOME` so it finds your config and tokens.
 Notes:
 - **Linux:** user services stop when you log out unless lingering is enabled —
   run `loginctl enable-linger $USER` for always-on. Logs: `journalctl --user -u ssr-gateway-<name> -f`.
-- **Windows:** the task runs a `@echo off` `.cmd` that launches the windowless
-  `pythonw.exe` via `start "" /b`, so only a brief console flash appears at
-  logon (not a persistent window); output goes to `~/.ssr/logs/gateway-<name>.log`.
+- **Windows:** runs under **pm2** with restart guards (`min_uptime` /
+  `max_restarts` / exponential backoff, single fork instance) so a crashing
+  gateway can't spawn endlessly; `pm2 save` + `pm2-windows-startup` resurrect it
+  on boot. For boot persistence run once: `npm i -g pm2-windows-startup &&
+  pm2-startup install`. Output goes to `~/.ssr/logs/gateway-<name>.log`.
 - **macOS:** stdout/stderr are written to `~/.ssr/logs/gateway-<name>.log`.
 - If no native manager is available (e.g. a minimal container), the gateway is
   still saved and run-instructions are printed — use Docker or pm2 instead.
@@ -251,12 +259,26 @@ over **JSON-RPC 2.0**; topics are dotted names with wildcards (`*` = one segment
   event arrives (or timeout), then resume with the event.
 - `bus_unsubscribe(listener_id)`, `bus_listeners()`, `bus_history(pattern)`.
 
-**Remote bus server.** Run a broker that connects many peers:
+**Embedded server (on by default).** Every `ssr` main process starts a
+**non-blocking** bus server (so external scripts / other agents can connect) and
+bridges its own bus to it. If the port is already taken (another `ssr` process
+owns it), it transparently reuses that one. Set an **API key** to require
+authentication — peers that don't present it are rejected:
 ```bash
-ssr bus serve --host 0.0.0.0 --port 8765      # start the broker
-ssr bus send task.done '{"id": 42}'           # publish from the CLI
-ssr bus listen 'task.*'                        # stream matching events
-ssr bus status                                 # ping + recent events
+# ~/.ssr/.env
+SSR_BUS_API_KEY=your-secret   # require auth on the bus
+SSR_BUS_HOST=127.0.0.1        # default
+SSR_BUS_PORT=8765             # default
+SSR_BUS_SERVE=1               # set 0 to disable the embedded server
+SSR_BUS_URL=                  # set to bridge to an external server instead
+```
+
+**Remote bus server.** Or run a standalone broker that connects many peers:
+```bash
+ssr bus serve --host 0.0.0.0 --port 8765 --api-key SECRET   # start the broker
+ssr bus send task.done '{"id": 42}' --api-key SECRET        # publish from the CLI
+ssr bus listen 'task.*' --api-key SECRET                     # stream matching events
+ssr bus status --api-key SECRET                              # ping + recent events
 ```
 Point an agent at a broker with `SSR_BUS_URL=ws://host:8765` (or `/bus connect
 ws://host:8765` in the TUI); its built-in bus is then bridged so local and remote
@@ -269,7 +291,7 @@ the bus in code via the synchronous client — no `async`/`await` needed:
 ```python
 from ssr.bus import BusClient
 
-client = BusClient("ws://localhost:8765", source="my-script").connect()
+client = BusClient("ws://localhost:8765", source="my-script", api_key="your-secret").connect()
 client.publish("task.started", {"id": 42})
 client.subscribe("task.*", lambda ev: print("event:", ev.topic, ev.payload))
 event = client.wait_for("task.done", timeout=30)   # block for one event
