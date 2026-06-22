@@ -151,6 +151,27 @@ def _is_auth_error(exc: Exception) -> bool:
     )
 
 
+_SENSITIVE_KEYS = {
+    "passToken", "password", "hash", "ssecurity", "psecurity", "serviceToken",
+    "cUserId", "_sign", "nonce",
+}
+
+
+def _redact(obj):
+    """Recursively mask secret values so request/response can be logged safely."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k in _SENSITIVE_KEYS and v:
+                out[k] = f"<redacted len={len(str(v))}>"
+            else:
+                out[k] = _redact(v)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_redact(v) for v in obj]
+    return obj
+
+
 class CustomMiAccount(MiAccount):
     def __init__(self, session, username, password, token_store=None):
         super().__init__(session, username, password, token_store)
@@ -181,17 +202,30 @@ class CustomMiAccount(MiAccount):
         else:
             cookies["passToken"] = ""
         url = "https://account.xiaomi.com/pass/" + uri
+        method = "GET" if data is None else "POST"
+        # Record (redacted) request context so a failed login can be diagnosed.
+        self._last_request = {
+            "method": method,
+            "url": url,
+            "cookies": {
+                "deviceId": device_id,
+                "userId": cookies.get("userId", ""),
+                "passToken": ("<set>" if cookies.get("passToken") else "<empty>"),
+                "sdkVersion": cookies.get("sdkVersion"),
+            },
+            "data": _redact(dict(data)) if isinstance(data, dict) else data,
+            "userAgent": user_agent,
+        }
         async with self.session.request(
-            "GET" if data is None else "POST",
-            url,
-            data=data,
-            cookies=cookies,
-            headers=headers,
-            ssl=False,
+            method, url, data=data, cookies=cookies, headers=headers, ssl=False,
         ) as r:
             raw = await r.read()
+            status = r.status
         resp = json.loads(raw[11:])
-        logger.debug("%s: %s", uri, resp)
+        logger.debug(
+            "Mi %s %s -> HTTP %s | request=%s | response=%s",
+            method, uri, status, self._last_request, _redact(resp),
+        )
         return resp
 
     async def login(self, sid):
@@ -242,11 +276,14 @@ class CustomMiAccount(MiAccount):
                 }
                 resp = await self._serviceLogin("serviceLoginAuth2", data)
                 
-            # If the response indicates captcha or notification (verification), or does not have userId
-            if (resp.get("code") != 0 or 
-                "notificationUrl" in resp or 
-                "captchaUrl" in resp or 
-                ("userId" not in resp and not self.token.get("userId"))):
+            # Only treat notification/captcha as failures when they carry a
+            # *truthy* value: the Mi response ALWAYS includes ``notificationUrl``
+            # and ``captchaUrl`` keys (value None when not required), so checking
+            # ``"captchaUrl" in resp`` rejected even fully-successful logins.
+            if (resp.get("code") != 0 or
+                    resp.get("notificationUrl") or
+                    resp.get("captchaUrl") or
+                    ("userId" not in resp and not self.token.get("userId"))):
                 raise Exception(resp)
 
             if "userId" in resp:
@@ -268,17 +305,38 @@ class CustomMiAccount(MiAccount):
             if self.token_store:
                 self.token_store.save_token(self.token)
             
-            # Extract clean description to avoid spamming the console with the massive notificationUrl dict
+            # Extract a clean reason and log the *specific* failing request +
+            # redacted response so the cause is diagnosable from the logs.
             err_msg = str(e)
-            if e.args and isinstance(e.args[0], dict):
-                resp_dict = e.args[0]
-                if "notificationUrl" in resp_dict:
+            resp_dict = e.args[0] if (e.args and isinstance(e.args[0], dict)) else None
+            if resp_dict is not None:
+                if resp_dict.get("notificationUrl"):
                     err_msg = "安全验证未完成 (waiting for safety verification)"
-                elif "captchaUrl" in resp_dict:
+                elif resp_dict.get("captchaUrl"):
                     err_msg = "需要输入图形验证码 (captcha required)"
                 else:
                     err_msg = resp_dict.get("description") or resp_dict.get("desc") or "login failed"
-            logger.debug("MiAccount login failed: %s", err_msg)
+                # Spell out exactly which success-check tripped.
+                reasons = []
+                if resp_dict.get("code") not in (0, None):
+                    reasons.append(f"code={resp_dict.get('code')}")
+                if resp_dict.get("notificationUrl"):
+                    reasons.append("notificationUrl set (needs verification)")
+                if resp_dict.get("captchaUrl"):
+                    reasons.append("captchaUrl set (needs captcha)")
+                if "userId" not in resp_dict and not self.token.get("userId"):
+                    reasons.append("no userId in response")
+                logger.error(
+                    "MiAccount login(%s) failed: %s | failing-check=[%s] | "
+                    "request=%s | response=%s",
+                    sid, err_msg, ", ".join(reasons) or "unknown",
+                    getattr(self, "_last_request", None), _redact(resp_dict),
+                )
+            else:
+                logger.error(
+                    "MiAccount login(%s) errored: %s | request=%s",
+                    sid, err_msg, getattr(self, "_last_request", None),
+                )
             return False
 
     def _invalidate_sid(self, sid):
