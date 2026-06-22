@@ -642,7 +642,6 @@ class XiaomiSpeaker:
         try:
             service_token = acc.token["micoapi"][1]
             user_id = str(acc.token["userId"])
-            device_id = acc.token["deviceId"]
         except (KeyError, IndexError, TypeError):
             return None
 
@@ -652,7 +651,14 @@ class XiaomiSpeaker:
             "https://userprofile.mina.mi.com/device_profile/v2/conversation"
             f"?source=dialogu&hardware={hardware}&timestamp={ts}&limit=2"
         )
-        cookies = {"userId": user_id, "serviceToken": service_token, "deviceId": device_id}
+        # The ``deviceId`` cookie must be the *speaker's* deviceID — the API
+        # filters conversation records by it. Using the login deviceId returns an
+        # empty list even when the speaker has history.
+        cookies = {
+            "userId": user_id,
+            "serviceToken": service_token,
+            "deviceId": self.device.device_id,
+        }
         headers = {"User-Agent": getattr(acc, "now_ua", "")}
         try:
             async with acc.session.get(url, cookies=cookies, headers=headers) as r:
