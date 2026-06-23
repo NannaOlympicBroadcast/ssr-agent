@@ -48,6 +48,15 @@ def decode_output(data: bytes | None) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _coerce_bool(v, default: bool = True) -> bool:
+    """Coerce a tool argument to bool (it may arrive as a string like 'false')."""
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("true", "1", "yes", "y", "t", "on")
+
+
 class ToolKit:
     """Holds runtime context and exposes bound tool callables."""
 
@@ -274,11 +283,12 @@ class ToolKit:
         )
 
     def push_notification(self, channel: str, target: str, message: str) -> str:
-        """Send a message or notification to a specific channel (e.g. feishu, wechat) and recipient.
+        """Send a message or notification to a specific channel and recipient.
 
         Args:
-            channel: Channel name ('feishu' or 'wechat').
-            target: The target user or chat identifier.
+            channel: Channel name — 'feishu', 'wechat', or 'xiaomi' (the XiaoAI
+                speaker, which speaks the message via TTS; voice-only, no media).
+            target: The target user or chat identifier (ignored for 'xiaomi').
             message: The message body to send.
         """
         from .tools_push import push_notification_impl
@@ -407,88 +417,71 @@ class ToolKit:
         event = bus.publish(topic, payload, source=source or None)
         return f"Published event {event.id} on '{topic}'."
 
-    def bus_subscribe(self, pattern: str, description: str = "") -> str:
-        """Create a bus listener that wakes the agent when a matching event fires.
+    def bus_create_handler(
+        self,
+        event: str,
+        handler_prompt: str = "",
+        type: str = "every",
+        inherit_session: bool = True,
+    ) -> str:
+        """Register a *bus event handler agent*: each matching event triggers an agent turn.
 
-        Use this to be *triggered by* bus events: when an event whose topic
-        matches `pattern` is published, a new agent turn starts describing it so
-        you can react. Patterns support wildcards: '*' (one segment) and '**'
-        (the rest), e.g. 'task.*' or 'agent.**'.
-
-        Args:
-            pattern: Topic pattern to listen for.
-            description: Optional human-readable note for this listener.
-        """
-        agent = getattr(self, "agent_instance", None)
-        if agent is None or not hasattr(agent, "subscribe_and_notify"):
-            return "ERROR: bus not available in this context"
-        listener_id = agent.subscribe_and_notify(pattern, description=description)
-        return f"Listening on '{pattern}' (listener {listener_id}). Matching events will wake the agent."
-
-    def bus_wait(self, pattern: str, timeout: float = 60.0) -> str:
-        """Suspend the current session until a matching bus event arrives.
-
-        Blocks this turn until an event whose topic matches `pattern` is
-        published (locally or via the remote server), or until `timeout` seconds
-        elapse. Returns the event as JSON, or a timeout notice.
+        Use this instead of blocking — the handler fires a fresh agent turn every
+        time a matching event arrives, so the same source can trigger you many
+        times and no event is missed on a timeout. If you genuinely need to wait
+        for one event before continuing, register a handler and end your turn;
+        the event will start a new turn (and the user can `/stop` to abort).
 
         Args:
-            pattern: Topic pattern to wait for (supports '*' and '**' wildcards).
-            timeout: Maximum seconds to wait before giving up.
+            event: Topic pattern to match — '*' = one segment, '**' = the rest
+                (e.g. 'task.*', 'cat.detected', 'agent.**').
+            handler_prompt: Instructions for the handler agent on how to react to
+                a matching event. The event topic/source/payload are appended.
+            type: 'every' (fire on every match) or 'once' (fire once, then the
+                handler auto-removes itself).
+            inherit_session: true = handle within the current conversation
+                (continues this session's context); false = isolated sub-agent.
         """
-        import json
-
-        # Tool arguments may arrive as strings (e.g. timeout="120"); coerce so
-        # numeric comparisons below don't raise TypeError.
-        try:
-            timeout = float(timeout)
-        except (TypeError, ValueError):
-            timeout = 60.0
-
-        bus = self._bus()
-        if bus is None:
-            return "ERROR: bus not available in this context"
-        # Pass the agent's stop flag so the wait stays interruptible: /stop ends
-        # it promptly instead of freezing the turn for the whole timeout, which
-        # also keeps the session responsive to concurrent /btw side-questions.
         agent = getattr(self, "agent_instance", None)
-        cancel = getattr(agent, "_stop_event", None)
-        event = bus.wait_for(
-            pattern,
-            timeout=timeout if timeout and timeout > 0 else None,
-            cancel=cancel,
+        if agent is None or not hasattr(agent, "create_bus_handler"):
+            return "ERROR: bus not available in this context"
+        once = str(type).strip().lower() in ("once", "one", "oneshot", "one-shot", "1")
+        inherit = _coerce_bool(inherit_session, default=True)
+        hid = agent.create_bus_handler(
+            event, handler_prompt, once=once, inherit_session=inherit,
+            description=(handler_prompt[:60] if handler_prompt else ""),
         )
-        if event is None:
-            if cancel is not None and cancel.is_set():
-                return f"INTERRUPTED: stopped waiting for '{pattern}' (/stop)."
-            return f"TIMEOUT: no event matching '{pattern}' within {timeout}s."
-        return "Received event:\n" + json.dumps(event.to_dict(), ensure_ascii=False, indent=2)
+        kind = "once" if once else "every match"
+        ctx = "current session" if inherit else "isolated sub-agent"
+        return (
+            f"Created bus handler {hid} on '{event}' ({kind}, {ctx}). "
+            f"Remove it with bus_remove_handler('{hid}')."
+        )
 
-    def bus_unsubscribe(self, listener_id: str) -> str:
-        """Remove a bus listener created by bus_subscribe.
+    def bus_remove_handler(self, handler_id: str) -> str:
+        """Destroy a bus handler created by bus_create_handler.
 
         Args:
-            listener_id: The id returned when the listener was created.
+            handler_id: The id returned when the handler was created.
         """
-        bus = self._bus()
-        if bus is None:
-            return "ERROR: bus not available in this context"
         agent = getattr(self, "agent_instance", None)
-        if agent is not None:
-            getattr(agent, "_bus_notify_listeners", {}).pop(listener_id, None)
-        return "Removed listener." if bus.unsubscribe(listener_id) else "No such listener."
+        if agent is None or not hasattr(agent, "remove_bus_handler"):
+            return "ERROR: bus not available in this context"
+        return "Removed bus handler." if agent.remove_bus_handler(handler_id) else "No such handler."
 
     def bus_listeners(self) -> str:
-        """List the active bus listeners on this agent's bus."""
-        bus = self._bus()
-        if bus is None:
+        """List the active bus event handlers on this agent."""
+        agent = getattr(self, "agent_instance", None)
+        if agent is None or not hasattr(agent, "bus_handlers"):
             return "ERROR: bus not available in this context"
-        listeners = bus.listeners()
-        if not listeners:
-            return "(no active bus listeners)"
+        handlers = agent.bus_handlers()
+        if not handlers:
+            return "(no active bus handlers)"
         return "\n".join(
-            f"- {ls['id']}  pattern='{ls['pattern']}'  {ls.get('description', '')}".rstrip()
-            for ls in listeners
+            f"- {h['id']}  pattern='{h.get('pattern')}'  "
+            f"{'once' if h.get('once') else 'every'}  "
+            f"{'session' if h.get('inherit_session') else 'isolated'}"
+            for h in handlers
         )
 
     def bus_history(self, pattern: str = "**", limit: int = 10) -> str:
@@ -542,9 +535,8 @@ class ToolKit:
             self.push_notification,
             self.send_file_to_user,
             self.bus_publish,
-            self.bus_subscribe,
-            self.bus_wait,
-            self.bus_unsubscribe,
+            self.bus_create_handler,
+            self.bus_remove_handler,
             self.bus_listeners,
             self.bus_history,
         ]

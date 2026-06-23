@@ -23,7 +23,14 @@ def push_notification_impl(settings: Settings, channel_name: str, target: str, m
     channel = registry.get(channel_name)
     if not channel:
         return f"ERROR: Channel '{channel_name}' not found. Registered channels: {', '.join(c.name for c in registry.list_channels())}"
-        
+
+    # XiaoAI speaker is voice-only: speak the text via TTS (it can't send media).
+    if channel_name.lower() == "xiaomi" and hasattr(channel, "send_tts"):
+        import re
+        text = re.sub(r"<ssr_reply_(?:image|files)>.*?</ssr_reply_(?:image|files)>",
+                      "", message, flags=re.DOTALL).strip()
+        return channel.send_tts(settings, text or message)
+
     try:
         if hasattr(channel, "load_config"):
             channel.load_config(settings)

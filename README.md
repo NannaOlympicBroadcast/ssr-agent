@@ -253,11 +253,14 @@ over **JSON-RPC 2.0**; topics are dotted names with wildcards (`*` = one segment
 
 **Agent tools** (the model can call these):
 - `bus_publish(topic, payload_json)` — emit an event to communicate.
-- `bus_subscribe(pattern)` — register a listener; matching events **wake the agent**
-  with a new turn (the same wake mechanism used for finished background terminals).
-- `bus_wait(pattern, timeout)` — **suspend the current session** until a matching
-  event arrives (or timeout), then resume with the event.
-- `bus_unsubscribe(listener_id)`, `bus_listeners()`, `bus_history(pattern)`.
+- `bus_create_handler(event, handler_prompt, type, inherit_session)` — register a
+  **bus event handler agent**: each matching event fires a fresh agent turn that
+  follows `handler_prompt`. `type` is `every`/`once`; `inherit_session=true`
+  continues the current conversation, `false` runs an isolated sub-agent. This
+  replaces blocking — it never freezes the main loop and never misses an event on
+  a timeout. (If you must wait for one event, register a handler and end the turn;
+  the event starts a new turn, and the user can `/stop` to abort.)
+- `bus_remove_handler(handler_id)`, `bus_listeners()`, `bus_history(pattern)`.
 
 **Embedded server (on by default).** Every `ssr` main process starts a
 **non-blocking** bus server (so external scripts / other agents can connect) and

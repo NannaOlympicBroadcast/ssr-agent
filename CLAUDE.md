@@ -33,9 +33,12 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   a non-blocking embedded bus server** (`SSR_BUS_SERVE`, default on; reuses an
   existing one on port conflict) and bridges to it; set `SSR_BUS_API_KEY` to
   require auth (handshake `bus.auth`), plus `SSR_BUS_HOST`/`SSR_BUS_PORT`/
-  `SSR_BUS_URL`. Agent tools: `bus_publish`, `bus_subscribe` (wakes the agent on
-  matching events — even when idle), `bus_wait` (interruptible by `/stop`),
-  `bus_unsubscribe`, `bus_listeners`, `bus_history`; REPL `/bus`, CLI
+  `SSR_BUS_URL`. Agent tools: `bus_publish`, `bus_create_handler` (register a
+  *handler agent* that fires a fresh turn on every matching event — `type`
+  once/every, `inherit_session` to continue the current conversation or run an
+  isolated sub-agent; never blocks, so no missed-on-timeout events),
+  `bus_remove_handler`, `bus_listeners`, `bus_history`. `push_notification` can
+  target the `xiaomi` speaker (voice-only TTS). REPL `/bus`, CLI
   `ssr bus <serve|send|listen|status>` (all accept `--api-key`).
 - `ssr/plugins.py` + `ssr/builtin_plugins/` — bundled *plugins* (Claude-Code
   `.claude-plugin/plugin.json` + `.mcp.json` format) that contribute MCP servers,

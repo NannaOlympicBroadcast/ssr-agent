@@ -33,8 +33,8 @@ Operating principles:
 5. Use `web_search` (Tavily) for up-to-date external information.
 6. Delegate self-contained subtasks to `spawn_sub_agent`.
 7. Coordinate asynchronously over the event bus: `bus_publish` to emit events,
-   `bus_subscribe` to be woken when matching events arrive, and `bus_wait` to
-   suspend until an event happens (e.g. waiting on another agent or task).
+   and `bus_create_handler` to register a handler agent that reacts each time a
+   matching event arrives (instead of blocking). Don't block waiting on events.
 Be concise. Show your reasoning through the plan and tool calls, not verbosity.
 """
 
@@ -119,47 +119,91 @@ class SSRAgent:
         self.settings.bus_url = url
         return f"Bus bridged to {url}."
 
-    def subscribe_and_notify(self, pattern: str, description: str = "") -> str:
-        """Subscribe so that each matching event wakes the agent with a new turn.
+    def create_bus_handler(
+        self,
+        pattern: str,
+        handler_prompt: str = "",
+        *,
+        once: bool = False,
+        inherit_session: bool = True,
+        description: str = "",
+    ) -> str:
+        """Register a *bus event handler agent*.
 
-        This is how an agent "is triggered by" bus events: when an event matches,
-        a background turn is started informing the agent of the event (mirroring
-        how completed background terminals wake the agent).
+        Each event whose topic matches ``pattern`` fires a fresh agent turn that
+        follows ``handler_prompt`` (plus the event details). This replaces the
+        old blocking ``bus_wait``: it never blocks the main loop and never misses
+        an event on timeout, and the same event source can trigger the agent any
+        number of times.
+
+        * ``once``            — fire once, then auto-remove the handler.
+        * ``inherit_session`` — True runs in the current conversation (continues
+          its context); False runs an isolated sub-agent.
+
+        Returns the handler id (pass it to :meth:`remove_bus_handler`).
         """
         def _on_event(event):
-            self._on_bus_event(event)
+            # For one-shot handlers, drop the listener *before* running so a fast
+            # follow-up event can't double-fire it.
+            if once:
+                self.bus.unsubscribe(listener_id)
+                self._bus_notify_listeners.pop(listener_id, None)
+            self._run_bus_handler(event, handler_prompt, inherit_session)
 
-        listener_id = self.bus.subscribe(pattern, _on_event, description=description or "agent notify")
-        self._bus_notify_listeners[listener_id] = pattern
+        listener_id = self.bus.subscribe(
+            pattern, _on_event, description=description or (handler_prompt[:60] or "bus handler")
+        )
+        self._bus_notify_listeners[listener_id] = {
+            "pattern": pattern,
+            "prompt": handler_prompt,
+            "once": bool(once),
+            "inherit_session": bool(inherit_session),
+            "description": description,
+        }
         return listener_id
 
-    def _on_bus_event(self, event) -> None:
-        """Wake the agent with a turn describing a bus event (notify listeners)."""
+    def remove_bus_handler(self, handler_id: str) -> bool:
+        """Destroy a handler created by :meth:`create_bus_handler`."""
+        self._bus_notify_listeners.pop(handler_id, None)
+        return self.bus.unsubscribe(handler_id)
+
+    def bus_handlers(self) -> list[dict]:
+        """Active bus handlers (id + pattern/once/inherit metadata)."""
+        return [{"id": hid, **meta} for hid, meta in self._bus_notify_listeners.items()]
+
+    def _run_bus_handler(self, event, handler_prompt: str, inherit_session: bool) -> None:
+        """Fire an agent turn for a matching bus event (handler callback)."""
         import json as _json
         import threading as _threading
         import time as _time
 
         self._emit("bus_event", tag="ssr", topic=event.topic, source=event.source)
-        # This callback only fires for *deliberate* subscriptions (bus_subscribe
-        # / subscribe_and_notify), so the agent explicitly asked to react to
-        # these events — wake it even when idle (no active session yet). This is
-        # what lets one agent's published event be acted on by another agent that
-        # is merely subscribed and waiting. Bus-triggered turns are serialized so
-        # concurrent events don't race on the shared conversation history.
 
-        def run_wakeup():
+        # A handler is a *deliberate* registration, so fire even when idle (no
+        # active session). Session-inheriting turns are serialized via the wake
+        # lock so concurrent events don't race on the shared conversation history.
+        def run_handler():
             _time.sleep(0.2)
             try:
                 payload = _json.dumps(event.payload, ensure_ascii=False)
             except Exception:
                 payload = str(event.payload)
+            event_desc = (
+                f"[Bus event] topic='{event.topic}' from '{event.source}'. Payload: {payload}."
+            )
             prompt = (
-                f"[Bus] Event received on topic '{event.topic}' from {event.source}. "
-                f"Payload: {payload}. Decide whether and how to act on it."
+                f"{handler_prompt}\n\n{event_desc}" if handler_prompt
+                else f"{event_desc} Decide whether and how to act on it."
             )
             try:
-                with self._bus_wake_lock:
-                    reply = self.run(prompt)
+                if inherit_session:
+                    with self._bus_wake_lock:
+                        reply = self.run(prompt)
+                else:
+                    reply = self._run_sub_agent(
+                        handler_prompt or "React to the following bus event.",
+                        context=event_desc,
+                    )
                 self._emit("thinking", tag="ssr", text=f"\n[ssr ▸] {reply}\n")
                 active_ctx = getattr(self, "active_im_context", None)
                 if active_ctx:
@@ -169,7 +213,7 @@ class SSRAgent:
             except Exception:
                 pass
 
-        _threading.Thread(target=run_wakeup, daemon=True).start()
+        _threading.Thread(target=run_handler, daemon=True).start()
 
     def close(self) -> None:
         """Tear down all managed MCP server subprocesses and the bus bridge."""
@@ -242,7 +286,9 @@ class SSRAgent:
             "3. For Feishu/WeChat messaging: Use XML tags to carry media. \n"
             "   - <ssr_reply_image>file_path</ssr_reply_image> for images\n"
             "   - <ssr_reply_files>file_path</ssr_reply_files> for files\n"
-            "   System will automatically parse, send, and strip these tags from your final text."
+            "   System will automatically parse, send, and strip these tags from your final text.\n"
+            "4. 小爱音箱(XiaoAI speaker)只能播报文本语音，不支持发送图片和文件。"
+            "如果用户需要发送文件，请询问用户：是否要将文件通过飞书转发。"
         )
         
         # User defined rules from load_rules
@@ -597,7 +643,7 @@ class SSRAgent:
         try:
             sub_toolkit = ToolKit(self.settings, self.retriever, self.memory, sub_agent_runner=None)
             # Share the parent agent so the sub-agent's bus / memory / emit tools
-            # work (without this, bus_wait/bus_subscribe/bus_history all report
+            # work (without this, bus_create_handler/bus_history all report
             # "bus not available in this context").
             sub_toolkit.agent_instance = self
             prompt = task if not context else f"Context:\n{context}\n\nTask:\n{task}"

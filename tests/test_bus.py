@@ -227,37 +227,65 @@ def _toolkit_with_bus(tmp_path):
     tk = ToolKit(settings, retriever=None, memory=None)
 
     class _StubAgent:
+        """Faithful stand-in for SSRAgent's bus-handler API (records fires)."""
+
         def __init__(self):
             self.bus = MessageBus(name="stub", source="stub")
             self._bus_notify_listeners = {}
+            self.fired = []
 
-        def subscribe_and_notify(self, pattern, description=""):
-            return self.bus.subscribe(pattern, lambda ev: None, description=description)
+        def create_bus_handler(self, pattern, handler_prompt="", *, once=False,
+                               inherit_session=True, description=""):
+            def _on(ev):
+                if once:
+                    self.bus.unsubscribe(lid)
+                    self._bus_notify_listeners.pop(lid, None)
+                self.fired.append((ev.topic, handler_prompt, inherit_session))
+            lid = self.bus.subscribe(pattern, _on, description=description)
+            self._bus_notify_listeners[lid] = {
+                "pattern": pattern, "prompt": handler_prompt, "once": once,
+                "inherit_session": inherit_session, "description": description,
+            }
+            return lid
+
+        def remove_bus_handler(self, hid):
+            self._bus_notify_listeners.pop(hid, None)
+            return self.bus.unsubscribe(hid)
+
+        def bus_handlers(self):
+            return [{"id": k, **v} for k, v in self._bus_notify_listeners.items()]
 
     tk.agent_instance = _StubAgent()
     return tk
 
 
-def test_toolkit_bus_publish_history_listeners(tmp_path):
+def test_toolkit_bus_publish_history_handlers(tmp_path):
     tk = _toolkit_with_bus(tmp_path)
     assert "Published" in tk.bus_publish("task.done", '{"id": 3}')
     assert "task.done" in tk.bus_history("**", 10)
-    assert "Listening" in tk.bus_subscribe("task.*", "watch tasks")
+    out = tk.bus_create_handler("task.*", "watch tasks", type="every", inherit_session=False)
+    assert "Created bus handler" in out and "isolated" in out
     assert "pattern='task.*'" in tk.bus_listeners()
 
 
-def test_toolkit_bus_wait(tmp_path):
+def test_toolkit_bus_handler_fires_and_once(tmp_path):
     tk = _toolkit_with_bus(tmp_path)
-    bus = tk.agent_instance.bus
-
-    def _later():
-        time.sleep(0.2)
-        bus.publish("done.now", {"ok": 1})
-
-    threading.Thread(target=_later, daemon=True).start()
-    out = tk.bus_wait("done.now", timeout=2.0)
-    assert "Received event" in out and "done.now" in out
-    assert tk.bus_wait("nope", timeout=0.2).startswith("TIMEOUT")
+    agent = tk.agent_instance
+    # 'every' handler fires on each match.
+    tk.bus_create_handler("done.*", "react", type="every")
+    agent.bus.publish("done.a", {})
+    agent.bus.publish("done.b", {})
+    assert len(agent.fired) == 2
+    # 'once' handler fires a single time, then auto-removes.
+    agent.fired.clear()
+    tk.bus_create_handler("one.*", "react once", type="once")
+    agent.bus.publish("one.x", {})
+    agent.bus.publish("one.y", {})
+    assert len(agent.fired) == 1
+    # string arg coercion: type/inherit_session may arrive as strings.
+    out = tk.bus_create_handler("s.*", "p", type="once", inherit_session="false")
+    hid = out.split("handler ")[1].split(" ")[0]
+    assert "Removed bus handler." == tk.bus_remove_handler(hid)
 
 
 def test_toolkit_bus_no_agent(tmp_path):
@@ -268,7 +296,7 @@ def test_toolkit_bus_no_agent(tmp_path):
     settings.ensure_dirs()
     tk = ToolKit(settings, retriever=None, memory=None)  # no agent_instance
     assert tk.bus_publish("x").startswith("ERROR")
-    assert tk.bus_wait("x", timeout=0.1).startswith("ERROR")
+    assert tk.bus_create_handler("x", "p").startswith("ERROR")
 
 
 def test_cli_bus_parser():

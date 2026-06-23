@@ -198,6 +198,40 @@ class XiaomiChannel(AbstractChannel):
             return
         asyncio.run_coroutine_threadsafe(self._speaker.speak(text), self._loop)
 
+    def send_tts(self, settings: Settings, text: str) -> str:
+        """Speak ``text`` on the speaker — used as a push channel.
+
+        Reuses the live speaker when the channel is serving; otherwise does a
+        one-off login → speak → close so a notification can be pushed by voice
+        even when the XiaoAI channel isn't running.
+        """
+        text = (text or "").strip()
+        if not text:
+            return "ERROR: empty message"
+        if self._speaker is not None and self._loop is not None:
+            asyncio.run_coroutine_threadsafe(self._speaker.speak(text), self._loop)
+            return "Spoken on the live XiaoAI speaker."
+
+        from ssr.integrations.xiaomi import XiaomiSpeaker, load_config
+
+        cfg = load_config(settings)
+        if cfg is None or not cfg.account:
+            return "ERROR: XiaoAI not configured — run: ssr channel config xiaomi"
+
+        async def _run() -> None:
+            speaker = XiaomiSpeaker(settings, cfg)
+            try:
+                await speaker.connect()
+                await speaker.speak(text)
+            finally:
+                await speaker.close()
+
+        try:
+            asyncio.run(_run())
+            return "Spoken on the XiaoAI speaker (one-off)."
+        except Exception as e:
+            return f"ERROR speaking on XiaoAI: {e}"
+
     def send_file(self, target: str, path: str, mime_type: str) -> None:
         # A speaker has no display; announce the file by voice instead.
         name = Path(path).name

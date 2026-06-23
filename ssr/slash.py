@@ -250,10 +250,11 @@ def _handle_bus(args: list[str], agent: SSRAgent, console: Console) -> None:
         if not rest:
             console.print("[yellow]Usage: /bus listen <pattern>[/yellow]")
             return
-        listener_id = agent.subscribe_and_notify(rest[0], description="/bus listen")
+        handler_prompt = " ".join(rest[1:]).strip()
+        listener_id = agent.create_bus_handler(rest[0], handler_prompt, description="/bus listen")
         console.print(
-            f"[green]Listening[/green] on '{rest[0]}' (listener {listener_id}). "
-            "Matching events will wake the agent."
+            f"[green]Handler[/green] {listener_id} on '{rest[0]}'. "
+            "Each matching event will trigger an agent turn."
         )
 
     elif sub == "wait":
