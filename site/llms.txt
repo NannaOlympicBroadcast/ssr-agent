@@ -1,0 +1,35 @@
+# SSR Agent
+
+> SSR Agent (`ssr`) is an extensible command-line AI coding & collaboration agent built on Google ADK with Gemini. It pairs retrieval-augmented context with tool-calling and asynchronous coordination: a five-category context pool with an embedding index, a rich toolkit (filesystem, shell, background terminals, memory, web search, sub-agents, planning), a JSON-RPC event bus, MCP plugins, a skills system, IM/voice channels (Feishu, WeChat, XiaoAI speaker), OS-native gateways, multi-model routing, and an OpenAI-compatible server.
+
+Key facts for an LLM:
+- Entry point is the `ssr` CLI. Default model is Gemini (`gemini-3.1-flash-lite`); Anthropic/OpenAI are also supported via `ssr models config`.
+- State lives under `~/.ssr` (`SSR_HOME`): `.env`, `mcp.json`, `sessions/`, `indexes/`, `skills/`, `plugins/`, channel configs/tokens.
+- Everything degrades gracefully when optional dependencies or the network are missing.
+
+## Capabilities
+
+- [Context Pool](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Five categories — tools / configurations / skills / memory / refs — with a model2vec embedding index; unified retriever does classic grep + semantic search. Rebuild with `ssr index`.
+- [Toolkit](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Typed function tools — read/write files, `run_command`, background async terminals, `remember`/`recall_memory`, Tavily `web_search`, `search_context`, `spawn_sub_agent`, plan management.
+- [Event Bus](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Structured JSON-RPC 2.0 pub/sub. `bus_create_handler(event, handler_prompt, type, inherit_session)` registers a handler agent that fires a fresh turn on every matching event (type=every/once; inherit_session continues the session or runs an isolated sub-agent) — non-blocking, never misses an event on timeout. `bus_remove_handler`, `bus_publish`, `bus_history`, `bus_listeners`. Every main process auto-starts a non-blocking server with optional API-key auth (`SSR_BUS_API_KEY`).
+- [Plugins & MCP](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Claude-Code-format plugins contribute MCP servers, merged with `~/.ssr/mcp.json`; shared credentials via `${namespace.key}`. Ships chrome-devtools. MCP tools surface as `mcp__<server>__<tool>`.
+- [Skills](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Discovered across `~/.agent`, `~/.codex`, `~/.gemini`, `~/.claude`, `~/.ssr`, plus installable built-in skills (incl. review-mode).
+- [Channels](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Feishu (Lark), WeChat, and the XiaoAI speaker (polls Mi cloud conversation history for ASR, replies via TTS — pauses playback first, uses MiIO play-text). `ssr channel login xiaomi --browser` harvests the token via the DevTools Protocol.
+- [Gateway](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Install a channel-bound instance as an OS service — systemd user unit (Linux), launchd (macOS), pm2 (Windows, with restart guards + boot persistence; falls back to a Scheduled Task).
+- [Multi-model & servers](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): `ssr models config` (Gemini/Anthropic/OpenAI + fallbacks); `ssr serve` (OpenAI-compatible HTTP); `ssr --experimental-acp` (Agent Client Protocol over stdio); Docker via `Dockerfile`/`docker-compose.yml`.
+
+## Commands
+
+- `ssr` — launch the interactive TUI.
+- `ssr ask "<prompt>"` — one-shot question.
+- `ssr index [category]` — rebuild the embedding index.
+- `ssr models config` — configure LLM providers.
+- `ssr serve --port 8000` — OpenAI-compatible HTTP server.
+- `ssr bus serve|send|listen|status [--api-key K]` — event bus.
+- `ssr channel config|login|on <feishu|wechat|xiaomi>` — messaging/voice channels.
+- `ssr gateway install|status|start|stop|uninstall <name> --channel <ch>` — run a channel as a system service.
+- `ssr task create <name> "<prompt>" --cron "*/30 * * * *"` — recurring background task (pm2).
+
+## Source
+
+- [GitHub repository](https://github.com/NannaOlympicBroadcast/ssr-agent): full source, README, and CLAUDE.md project guide.

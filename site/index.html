@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SSR Agent — 命令行 AI 编码与协作智能体</title>
+<meta name="description" content="SSR Agent 是一个基于 Google ADK + Gemini 的命令行编码智能体：上下文池、事件总线、MCP 插件、技能、IM/语音频道、网关、多模型与 OpenAI 兼容服务。" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A4%96%3C/text%3E%3C/svg%3E" />
+<style>
+  :root{
+    --bg:#0a0e14; --bg2:#0f1620; --card:#131c28; --line:#1f2b3a;
+    --fg:#e6edf3; --muted:#9bb0c4; --dim:#6b7f93;
+    --accent:#5eead4; --accent2:#818cf8; --accent3:#f0abfc;
+    --code:#0c1219;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Helvetica,Arial,sans-serif;
+    line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  code,pre{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+  /* hero */
+  header.hero{
+    position:relative;overflow:hidden;
+    background:
+      radial-gradient(1100px 460px at 75% -10%, rgba(129,140,248,.20), transparent 60%),
+      radial-gradient(900px 420px at 10% 0%, rgba(94,234,212,.16), transparent 55%),
+      linear-gradient(180deg,var(--bg2),var(--bg));
+    border-bottom:1px solid var(--line);
+  }
+  .hero-inner{padding:84px 24px 70px;text-align:center}
+  .badge{
+    display:inline-block;font-size:13px;color:var(--accent);
+    border:1px solid var(--line);border-radius:999px;padding:5px 14px;margin-bottom:22px;
+    background:rgba(94,234,212,.06)
+  }
+  h1{
+    font-size:clamp(34px,6vw,60px);line-height:1.08;margin:0 0 18px;font-weight:800;letter-spacing:-.02em;
+    background:linear-gradient(110deg,#fff 10%,var(--accent) 45%,var(--accent2) 80%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .sub{font-size:clamp(16px,2.4vw,20px);color:var(--muted);max-width:720px;margin:0 auto 30px}
+  .cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .btn{
+    display:inline-block;padding:12px 22px;border-radius:12px;font-weight:600;font-size:15px;
+    border:1px solid var(--line);color:var(--fg);background:var(--card);transition:.15s;
+  }
+  .btn:hover{text-decoration:none;border-color:var(--accent);transform:translateY(-1px)}
+  .btn.primary{background:linear-gradient(110deg,var(--accent),var(--accent2));color:#06121a;border:none}
+
+  /* terminal */
+  .term{
+    max-width:760px;margin:44px auto 0;text-align:left;background:var(--code);
+    border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,.45)
+  }
+  .term .bar{display:flex;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line);background:#0a0f16}
+  .dot{width:12px;height:12px;border-radius:50%}
+  .term pre{margin:0;padding:18px 20px;font-size:13.5px;color:#cfe3f4;overflow-x:auto}
+  .term .c{color:var(--accent)}.term .g{color:var(--dim)}.term .o{color:var(--accent3)}
+
+  /* sections */
+  section{padding:64px 0;border-bottom:1px solid var(--line)}
+  h2{font-size:clamp(24px,4vw,34px);margin:0 0 8px;letter-spacing:-.01em}
+  .lead{color:var(--muted);margin:0 0 34px;max-width:640px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:18px}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px;transition:.18s
+  }
+  .card:hover{border-color:#2c3e54;transform:translateY(-3px);box-shadow:0 16px 40px rgba(0,0,0,.35)}
+  .card .ic{font-size:26px;margin-bottom:10px}
+  .card h3{margin:0 0 8px;font-size:17px}
+  .card p{margin:0;color:var(--muted);font-size:14.5px}
+  .card code{color:var(--accent);background:rgba(94,234,212,.08);padding:1px 6px;border-radius:6px;font-size:12.5px}
+
+  /* quickstart */
+  pre.block{
+    background:var(--code);border:1px solid var(--line);border-radius:14px;
+    padding:20px 22px;overflow-x:auto;font-size:13.5px;color:#cfe3f4
+  }
+  pre.block .c{color:var(--accent)}.block .g{color:var(--dim)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:720px){.two{grid-template-columns:1fr}}
+
+  footer{padding:48px 0 64px;text-align:center;color:var(--dim)}
+  footer a{color:var(--muted)}
+  .pillrow{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px}
+  .pill{font-size:12.5px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:4px 12px}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <span class="badge">🤖 Google ADK · Gemini · 命令行优先</span>
+    <h1>SSR Agent</h1>
+    <p class="sub">一个可扩展的命令行 AI 编码与协作智能体：检索式上下文、异步事件总线、MCP 插件、技能系统，以及飞书 / 微信 / 小爱音箱多频道接入。</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/NannaOlympicBroadcast/ssr-agent">GitHub 仓库 →</a>
+      <a class="btn" href="#features">查看功能</a>
+      <a class="btn" href="/llms.txt">llms.txt</a>
+    </div>
+
+    <div class="term" aria-label="终端示例">
+      <div class="bar"><span class="dot" style="background:#ff5f56"></span><span class="dot" style="background:#ffbd2e"></span><span class="dot" style="background:#27c93f"></span></div>
+<pre><span class="g"># 一行启动交互式 TUI</span>
+<span class="c">$ ssr</span>
+<span class="g"># 一次性提问</span>
+<span class="c">$ ssr ask</span> <span class="o">"重构这个模块并补测试"</span>
+<span class="g"># 把小爱音箱接成语音频道</span>
+<span class="c">$ ssr channel login xiaomi --browser</span>
+<span class="c">$ ssr gateway install voicebox --channel xiaomi</span></pre>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <h2>核心功能</h2>
+    <p class="lead">围绕「上下文检索 + 工具调用 + 异步协作」构建，每一块都能渐进降级，缺少可选依赖或网络时不致命。</p>
+    <div class="grid">
+      <div class="card"><div class="ic">🧠</div><h3>上下文池（Context Pool）</h3><p>五大类别 —— 工具 / 配置 / 技能 / 记忆 / 参考资料，配合 model2vec 嵌入索引，做经典 grep 与语义混合检索，回答前先「查」再「答」。</p></div>
+      <div class="card"><div class="ic">🛠️</div><h3>工具集（Toolkit）</h3><p>文件读写、<code>run_command</code>、后台异步终端、记忆持久化、Tavily 网络搜索、计划管理、子智能体委派 —— 都是带类型签名的纯函数。</p></div>
+      <div class="card"><div class="ic">📡</div><h3>事件总线（Event Bus）</h3><p>JSON-RPC 2.0 异步发布订阅。用 <code>bus_create_handler</code> 注册「事件处理者智能体」：每次匹配事件触发一个新回合，<b>不阻塞主循环、不漏事件</b>，支持一次性 / 每次、继承会话 / 隔离子智能体。</p></div>
+      <div class="card"><div class="ic">🔌</div><h3>插件与 MCP</h3><p>兼容 Claude-Code 插件格式，贡献 MCP 服务器并与 <code>~/.ssr/mcp.json</code> 合并；通过 <code>${namespace.key}</code> 共享凭据。内置 chrome-devtools。</p></div>
+      <div class="card"><div class="ic">📚</div><h3>技能系统（Skills）</h3><p>跨 <code>~/.agent</code> / <code>~/.codex</code> / <code>~/.gemini</code> / <code>~/.claude</code> / <code>~/.ssr</code> 发现技能，并内置可一键安装的内建技能（含 review-mode）。</p></div>
+      <div class="card"><div class="ic">💬</div><h3>IM / 语音频道</h3><p>飞书（Lark）、微信，以及<b>小爱音箱</b>：轮询小米云对话历史做 ASR，先暂停播放再用 TTS 念出回答（MiIO play-text）。浏览器一键登录、缓存 passToken。</p></div>
+      <div class="card"><div class="ic">🚀</div><h3>网关（Gateway）</h3><p>把频道实例装成系统服务，开机自启、崩溃重启：Linux systemd 用户单元、macOS launchd、<b>Windows pm2</b>（带重启护栏，缺 pm2 回退计划任务）。</p></div>
+      <div class="card"><div class="ic">🗂️</div><h3>会话记录（Sessions）</h3><p>追加式对话流水存于 <code>~/.ssr/sessions/&lt;id&gt;.jsonl</code>，REPL / 一次性 / 频道每一轮都被记录，<code>/sessions</code> 可浏览回放。</p></div>
+      <div class="card"><div class="ic">🧩</div><h3>多模型 & 兼容服务</h3><p><code>ssr models config</code> 配置 Gemini / Anthropic / OpenAI 多模型与回退；<code>ssr serve</code> 暴露 OpenAI 兼容 HTTP 服务；<code>--experimental-acp</code> 提供 ACP 协议。</p></div>
+      <div class="card"><div class="ic">🔔</div><h3>推送与协作</h3><p><code>push_notification</code> 可推送到飞书 / 微信 / <b>小爱音箱 TTS</b>；事件总线把多个智能体 / 任务 / 外部程序连起来，可选 api-key 鉴权。</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>快速上手</h2>
+    <p class="lead">需要 Python 环境与 <code>GEMINI_API_KEY</code>。安装后即可在终端使用。</p>
+    <div class="two">
+      <div>
+        <h3 style="margin:0 0 10px">安装 & 启动</h3>
+<pre class="block"><span class="g"># 安装（可编辑模式）</span>
+pip install -e .
+
+<span class="g"># 初始化 ~/.ssr，写入 .env 模板</span>
+ssr init
+
+<span class="g"># 启动交互式 TUI</span>
+ssr
+
+<span class="g"># 一次性提问</span>
+ssr ask <span style="color:#f0abfc">"给这个函数加上类型注解"</span></pre>
+      </div>
+      <div>
+        <h3 style="margin:0 0 10px">总线 · 频道 · 服务</h3>
+<pre class="block"><span class="g"># 事件总线（自带鉴权服务器）</span>
+ssr bus serve --api-key SECRET
+ssr bus send task.done <span style="color:#f0abfc">'{"id":42}'</span>
+
+<span class="g"># 把频道装成开机服务</span>
+ssr channel config feishu
+ssr gateway install bot --channel all
+
+<span class="g"># OpenAI 兼容 HTTP 服务</span>
+ssr serve --port 8000</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>给 LLM 的索引</h2>
+    <p class="lead">本站提供 <a href="/llms.txt">/llms.txt</a> —— 遵循 <a href="https://llmstxt.org" target="_blank" rel="noopener">llms.txt</a> 规范的机器可读索引，方便其它 AI 智能体快速理解 SSR Agent 的功能与文档入口。</p>
+    <pre class="block"><span class="c">curl</span> https://&lt;your-site&gt;.netlify.app/llms.txt</pre>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>SSR Agent · 基于 Google ADK + Gemini 的命令行编码智能体</div>
+    <div class="pillrow">
+      <span class="pill">Context Pool</span><span class="pill">Event Bus</span><span class="pill">MCP Plugins</span>
+      <span class="pill">Skills</span><span class="pill">Feishu / WeChat / XiaoAI</span><span class="pill">Gateway</span><span class="pill">Multi-Model</span>
+    </div>
+    <p style="margin-top:18px"><a href="https://github.com/NannaOlympicBroadcast/ssr-agent">github.com/NannaOlympicBroadcast/ssr-agent</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

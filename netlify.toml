@@ -1,0 +1,10 @@
+# Netlify config for the SSR Agent landing page (static, no build step).
+[build]
+  publish = "site"
+  command = ""
+
+# Serve the llms.txt index as UTF-8 plain text.
+[[headers]]
+  for = "/llms.txt"
+  [headers.values]
+    Content-Type = "text/plain; charset=utf-8"
