@@ -130,7 +130,7 @@
       <div class="card"><div class="ic">🔌</div><h3>插件与 MCP</h3><p>兼容 Claude-Code 插件格式，贡献 MCP 服务器并与 <code>~/.ssr/mcp.json</code> 合并；通过 <code>${namespace.key}</code> 共享凭据。内置 chrome-devtools。</p></div>
       <div class="card"><div class="ic">📚</div><h3>技能系统（Skills）</h3><p>跨 <code>~/.agent</code> / <code>~/.codex</code> / <code>~/.gemini</code> / <code>~/.claude</code> / <code>~/.ssr</code> 发现技能，并内置可一键安装的内建技能（含 review-mode）。</p></div>
       <div class="card"><div class="ic">💬</div><h3>IM / 语音频道</h3><p>飞书（Lark）、微信，以及<b>小爱音箱</b>：轮询小米云对话历史做 ASR，先暂停播放再用 TTS 念出回答（MiIO play-text）。浏览器一键登录、缓存 passToken。</p></div>
-      <div class="card"><div class="ic">🚀</div><h3>网关（Gateway）</h3><p>把频道实例装成系统服务，开机自启、崩溃重启：Linux systemd 用户单元、macOS launchd、<b>Windows pm2</b>（带重启护栏，缺 pm2 回退计划任务）。</p></div>
+      <div class="card"><div class="ic">🚀</div><h3>网关（Gateway）</h3><p>把频道实例装成系统服务，开机自启、崩溃重启：Linux systemd 用户单元、macOS launchd、<b>Windows nssm</b>（真正的开机自启服务，带重启护栏，缺 nssm 回退计划任务）。</p></div>
       <div class="card"><div class="ic">🗂️</div><h3>会话记录（Sessions）</h3><p>追加式对话流水存于 <code>~/.ssr/sessions/&lt;id&gt;.jsonl</code>，REPL / 一次性 / 频道每一轮都被记录，<code>/sessions</code> 可浏览回放。</p></div>
       <div class="card"><div class="ic">🧩</div><h3>多模型 & 兼容服务</h3><p><code>ssr models config</code> 配置 Gemini / Anthropic / OpenAI 多模型与回退；<code>ssr serve</code> 暴露 OpenAI 兼容 HTTP 服务；<code>--experimental-acp</code> 提供 ACP 协议。</p></div>
       <div class="card"><div class="ic">🔔</div><h3>推送与协作</h3><p><code>push_notification</code> 可推送到飞书 / 微信 / <b>小爱音箱 TTS</b>；事件总线把多个智能体 / 任务 / 外部程序连起来，可选 api-key 鉴权。</p></div>

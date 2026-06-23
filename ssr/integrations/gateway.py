@@ -7,11 +7,11 @@ installed using the platform's native service manager:
 
 * **Linux**  — a systemd *user* unit (``systemctl --user``).
 * **macOS**  — a launchd LaunchAgent plist (``launchctl``).
-* **Windows** — **pm2**, with pm2 itself installed as a Windows boot service so
-  the gateway survives reboot and restarts on failure. The process is described
-  by a pm2 ecosystem file and persisted with ``pm2 save``; ``pm2-windows-startup``
-  registers pm2 to resurrect the saved processes on boot. If pm2 is not on PATH
-  this falls back to a Scheduled Task that runs at logon (``schtasks``).
+* **Windows** — **nssm** (the Non-Sucking Service Manager), which wraps
+  ``ssr gateway run <name>`` in a genuine Windows service. It starts at boot
+  (``SERVICE_AUTO_START``), survives logout, and is restarted on failure by
+  nssm's own supervisor — no Node/pm2 toolchain required. If nssm is not on
+  PATH this falls back to a Scheduled Task that runs at logon (``schtasks``).
 
 Gateway definitions live in ``~/.ssr/gateways.json``; the service simply runs
 ``ssr gateway run <name>``, which loads the record and serves its channel. When
@@ -235,10 +235,10 @@ class _NullManager(ServiceManager):
     def install(self, settings: Settings, gw: Gateway, start: bool = True) -> str:
         cmd = " ".join(_exec_args(gw.name))
         return (
-            "未检测到受支持的系统服务管理器（systemd / launchd / schtasks）。\n"
+            "未检测到受支持的系统服务管理器（systemd / launchd / nssm / schtasks）。\n"
             f"网关 '{gw.name}' 已保存，可手动前台运行：\n    {cmd}\n"
-            "或使用 pm2 守护： pm2 start " + sys.executable
-            + f' --name {service_id(gw.name)} -- -m ssr gateway run {gw.name}'
+            "或安装 nssm 后注册为 Windows 服务： nssm install "
+            + f'{service_id(gw.name)} "{sys.executable}" -m ssr gateway run {gw.name}'
         )
 
     def uninstall(self, settings: Settings, name: str) -> str:
@@ -258,33 +258,27 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
-_PM2_PATH_CACHE: list = []  # memoized [path|None] for this process
+_NSSM_PATH_CACHE: list = []  # memoized [path|None] for this process
 
 
-def _find_pm2() -> str | None:
-    """Locate the ``pm2`` executable, even when npm's global bin is off PATH.
+def _find_nssm() -> str | None:
+    """Locate the ``nssm`` executable, even when it is off PATH.
 
-    Tries PATH first, then ``%APPDATA%\\npm`` and ``npm config get prefix`` —
-    so a service or otherwise stripped environment still finds the pm2 that the
-    user installed, instead of silently falling back to a Scheduled Task.
+    Tries PATH first, then the common Chocolatey / Scoop install locations — so
+    a service or otherwise stripped environment still finds the nssm the user
+    installed, instead of silently falling back to a Scheduled Task.
     """
-    if _PM2_PATH_CACHE:
-        return _PM2_PATH_CACHE[0]
-    found = shutil.which("pm2")
+    if _NSSM_PATH_CACHE:
+        return _NSSM_PATH_CACHE[0]
+    found = shutil.which("nssm")
     if not found:
         candidates = []
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            candidates.append(Path(appdata) / "npm" / "pm2.cmd")
-        try:
-            r = subprocess.run(
-                ["npm", "config", "get", "prefix"],
-                capture_output=True, text=True, shell=True, timeout=15,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                candidates.append(Path(r.stdout.strip()) / "pm2.cmd")
-        except Exception:
-            pass
+        programdata = os.environ.get("ProgramData")
+        if programdata:
+            candidates.append(Path(programdata) / "chocolatey" / "bin" / "nssm.exe")
+        userprofile = os.environ.get("USERPROFILE")
+        if userprofile:
+            candidates.append(Path(userprofile) / "scoop" / "shims" / "nssm.exe")
         for c in candidates:
             try:
                 if c.exists():
@@ -292,8 +286,31 @@ def _find_pm2() -> str | None:
                     break
             except OSError:
                 pass
-    _PM2_PATH_CACHE.append(found)
+    _NSSM_PATH_CACHE.append(found)
     return found
+
+
+def _query_gateway_processes(name: str) -> list[tuple[int, int]]:
+    """Return ``(pid, working_set_bytes)`` for the process(es) serving *name*.
+
+    Matched by command line (``gateway run <name>``) so it works regardless of
+    which supervisor (nssm service / scheduled task) launched the interpreter.
+    Concatenated — not f-string — so PowerShell's ``{ }`` stay intact.
+    """
+    needle = "gateway run " + name
+    script = (
+        "Get-CimInstance Win32_Process "
+        "-Filter \"Name='pythonw.exe' or Name='python.exe'\" | "
+        "Where-Object { $_.CommandLine -like '*" + needle + "*' } | "
+        "ForEach-Object { \"$($_.ProcessId) $($_.WorkingSetSize)\" }"
+    )
+    res = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], shell=True)
+    procs: list[tuple[int, int]] = []
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            procs.append((int(parts[0]), int(parts[1])))
+    return procs
 
 
 class SystemdManager(ServiceManager):
@@ -576,26 +593,12 @@ class WindowsTaskManager(ServiceManager):
         return self.start(settings, name)
 
     def _query_processes(self, name: str) -> list[tuple[int, int]]:
-        """Return ``(pid, working_set_bytes)`` for the process(es) serving *name*.
+        """Process(es) serving *name*, matched by command line.
 
-        Matched by command line so it works even though ``start /b`` detaches the
-        process from the scheduled task (which then reports "Ready", not the live
-        state). Concatenated — not f-string — so PowerShell's ``{ }`` stay intact.
+        ``start /b`` detaches the process from the scheduled task (which then
+        reports "Ready", not the live state), so match on the command line.
         """
-        needle = "gateway run " + name
-        script = (
-            "Get-CimInstance Win32_Process "
-            "-Filter \"Name='pythonw.exe' or Name='python.exe'\" | "
-            "Where-Object { $_.CommandLine -like '*" + needle + "*' } | "
-            "ForEach-Object { \"$($_.ProcessId) $($_.WorkingSetSize)\" }"
-        )
-        res = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], shell=True)
-        procs: list[tuple[int, int]] = []
-        for line in res.stdout.splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                procs.append((int(parts[0]), int(parts[1])))
-        return procs
+        return _query_gateway_processes(name)
 
     def status(self, settings: Settings, name: str) -> str:
         if self._query_processes(name):
@@ -616,170 +619,125 @@ class WindowsTaskManager(ServiceManager):
         return st
 
 
-class Pm2WindowsManager(ServiceManager):
-    """Run the gateway under **pm2** on Windows, with pm2 as a boot service.
+class NssmWindowsManager(ServiceManager):
+    """Run the gateway as a real Windows service via **nssm**.
 
-    pm2 manages the long-running ``ssr gateway run <name>`` process (described by
-    a per-gateway ecosystem file). ``pm2 save`` snapshots the process list and
-    ``pm2-windows-startup`` registers pm2 to resurrect it on boot — i.e. pm2 acts
-    as the Windows service that keeps the gateway alive across reboots.
+    nssm (the Non-Sucking Service Manager) wraps ``ssr gateway run <name>`` in a
+    genuine Windows service: it starts at boot (``SERVICE_AUTO_START``), survives
+    logout, and is restarted on failure by nssm's own supervisor — no Node/pm2
+    toolchain required. The program, arguments, working directory, environment,
+    log files and restart throttle are applied with ``nssm set``. Installing or
+    removing a service requires Administrator rights.
     """
 
-    backend = "pm2 (Windows boot service)"
+    backend = "nssm (Windows service)"
 
     def available(self) -> bool:
-        return _find_pm2() is not None
+        return _find_nssm() is not None
 
-    def _pm2(self, args: list[str]) -> subprocess.CompletedProcess:
-        # pm2 on Windows is a ``pm2.cmd`` shim, so it needs the shell. Resolve its
-        # full path because the npm global bin is often missing from a service's
-        # (or otherwise stripped) PATH, which would silently fall back to schtasks.
-        return _run([_find_pm2() or "pm2", *args], shell=True)
+    def _nssm(self, args: list[str]) -> subprocess.CompletedProcess:
+        # nssm is a real .exe (resolved to a full path), so no shell is needed.
+        return _run([_find_nssm() or "nssm", *args])
 
-    def _app_name(self, name: str) -> str:
+    def _service(self, name: str) -> str:
         return service_id(name)
 
-    def _ecosystem_path(self, settings: Settings, name: str) -> Path:
-        d = settings.home / "gateways"
-        d.mkdir(parents=True, exist_ok=True)
-        return d / f"{name}.pm2.json"
-
-    def _write_ecosystem(self, settings: Settings, gw: Gateway) -> Path:
-        """Write the pm2 ecosystem file describing the gateway process."""
-        log = str(logs_dir(settings) / f"gateway-{gw.name}.log")
-        env = {"SSR_HOME": str(settings.home), **(gw.env or {})}
-        app = {
-            "name": self._app_name(gw.name),
-            # Run ``<python> -m ssr gateway run <name>`` directly (no node wrapper).
-            "script": sys.executable,
-            "args": ["-m", "ssr", "gateway", "run", gw.name],
-            "interpreter": "none",
-            "cwd": gw.cwd or str(Path.home()),
-            "env": env,
-            # Auto-recover from genuine crashes, but guard against a tight restart
-            # loop (pm2 "forking infinite processes") when the gateway exits or
-            # crashes immediately: a start only counts as healthy after 15s, rapid
-            # restarts are capped, and pm2 backs off exponentially between them.
-            "autorestart": True,
-            "min_uptime": "15s",
-            "max_restarts": 5,
-            "exp_backoff_restart_delay": 200,
-            "instances": 1,
-            "exec_mode": "fork",
-            "out_file": log,
-            "error_file": log,
-            "merge_logs": True,
-        }
-        path = self._ecosystem_path(settings, gw.name)
-        path.write_text(json.dumps({"apps": [app]}, ensure_ascii=False, indent=2), "utf-8")
-        return path
-
-    def _ensure_boot_service(self) -> str:
-        """Make pm2 start on Windows boot (install pm2-windows-startup if needed).
-
-        Every step is time-bounded so a slow/offline ``npm`` can never hang
-        ``ssr gateway install`` — it just degrades to printed instructions.
-        """
-        def _try(cmd: list[str], timeout: float) -> subprocess.CompletedProcess | None:
-            try:
-                return _run(cmd, shell=True, timeout=timeout)
-            except Exception:
-                return None
-
-        if shutil.which("pm2-startup"):
-            res = _try(["pm2-startup", "install"], 60)
-            if res is not None and res.returncode == 0:
-                return "已配置 pm2 开机自启（pm2-windows-startup）。"
-            return "[!] pm2-startup install 失败/超时，请手动执行： pm2-startup install"
-        if shutil.which("npm"):
-            ins = _try(["npm", "install", "-g", "pm2-windows-startup"], 180)
-            if ins is not None and ins.returncode == 0 and shutil.which("pm2-startup"):
-                res = _try(["pm2-startup", "install"], 60)
-                if res is not None and res.returncode == 0:
-                    return "已安装并配置 pm2-windows-startup（开机自启）。"
-        return (
-            "[!] 未能自动把 pm2 安装为 Windows 开机服务，请手动执行其一：\n"
-            "    npm install -g pm2-windows-startup && pm2-startup install\n"
-            "    （或用 https://github.com/jessety/pm2-installer 安装为系统服务）"
-        )
+    def _set(self, svc: str, param: str, *values: str) -> None:
+        self._nssm(["set", svc, param, *values])
 
     def install(self, settings: Settings, gw: Gateway, start: bool = True) -> str:
-        eco = self._write_ecosystem(settings, gw)
-        # Re-add cleanly so repeated installs don't error on a duplicate name.
-        self._pm2(["delete", self._app_name(gw.name)])
-        res = self._pm2(["start", str(eco)])
+        svc = self._service(gw.name)
+        log = str(logs_dir(settings) / f"gateway-{gw.name}.log")
+        # Re-install cleanly so repeated installs don't error on a duplicate name.
+        self._nssm(["stop", svc])
+        self._nssm(["remove", svc, "confirm"])
+        res = self._nssm(["install", svc, sys.executable, "-m", "ssr", "gateway", "run", gw.name])
         if res.returncode != 0:
-            return f"[!] pm2 start 失败：{res.stderr.strip() or res.stdout.strip()}"
-        if not start:
-            self._pm2(["stop", self._app_name(gw.name)])
-        self._pm2(["save"])  # persist so pm2 resurrects it on boot
-        boot_msg = self._ensure_boot_service()
+            err = (res.stderr.strip() or res.stdout.strip()).replace("\x00", "")
+            hint = ""
+            if "denied" in err.lower() or "administrator" in err.lower():
+                hint = "\n（注册 Windows 服务需要管理员权限，请在管理员终端中重试。）"
+            return f"[!] nssm install 失败：{err}{hint}"
+        self._set(svc, "AppDirectory", gw.cwd or str(Path.home()))
+        # AppEnvironmentExtra takes one KEY=VALUE per argument.
+        env = {"SSR_HOME": str(settings.home), **(gw.env or {})}
+        self._set(svc, "AppEnvironmentExtra", *[f"{k}={v}" for k, v in env.items()])
+        self._set(svc, "AppStdout", log)
+        self._set(svc, "AppStderr", log)
+        # Restart on exit, but throttle to avoid a tight crash loop: only count a
+        # start as healthy after 15s, and back off 2s between restarts.
+        self._set(svc, "AppExit", "Default", "Restart")
+        self._set(svc, "AppThrottle", "15000")
+        self._set(svc, "AppRestartDelay", "2000")
+        self._set(svc, "Start", "SERVICE_AUTO_START")
+        self._set(svc, "DisplayName", svc)
+        self._set(svc, "Description", f"SSR Gateway ({gw.name}) — channel {gw.channel}")
         msg = (
-            f"已通过 pm2 注册网关 {self._app_name(gw.name)}（ecosystem： {eco}）。\n"
-            f"已执行 pm2 save，开机后由 pm2 自动恢复。\n"
-            f"{boot_msg}\n"
-            f"日志： {logs_dir(settings)}\\gateway-{gw.name}.log\n"
-            f"查看日志： pm2 logs {self._app_name(gw.name)}"
+            f"已通过 nssm 注册 Windows 服务 {svc}（开机自启，崩溃自动重启）。\n"
+            f"日志： {log}\n"
+            f"查看状态： nssm status {svc}    图形化管理： nssm edit {svc}"
         )
         if start:
-            msg += "\n已立即启动。"
+            r = self._nssm(["start", svc])
+            if r.returncode != 0:
+                msg += f"\n[!] 启动失败：{(r.stderr.strip() or r.stdout.strip()).replace(chr(0), '')}"
+            else:
+                msg += "\n已立即启动。"
         return msg
 
     def uninstall(self, settings: Settings, name: str) -> str:
-        self._pm2(["delete", self._app_name(name)])
-        self._pm2(["save"])
-        eco = self._ecosystem_path(settings, name)
-        if eco.exists():
-            eco.unlink()
-        # Clean up any legacy scheduled-task wrapper from the schtasks backend.
-        legacy = settings.home / "gateways" / f"{name}.cmd"
-        if legacy.exists():
-            legacy.unlink()
-        return f"已从 pm2 删除 {self._app_name(name)} 并更新 pm2 save。"
+        svc = self._service(name)
+        self._nssm(["stop", svc])
+        res = self._nssm(["remove", svc, "confirm"])
+        # Clean up artifacts left by older Windows backends (schtasks / pm2).
+        for legacy in (settings.home / "gateways" / f"{name}.cmd",
+                       settings.home / "gateways" / f"{name}.pm2.json"):
+            if legacy.exists():
+                legacy.unlink()
+        out = (res.stdout.strip() or res.stderr.strip()).replace("\x00", "")
+        return out or f"已移除 Windows 服务 {svc}。"
 
     def start(self, settings: Settings, name: str) -> str:
-        res = self._pm2(["start", self._app_name(name)])
-        self._pm2(["save"])
-        return res.stdout.strip() or res.stderr.strip() or f"{self._app_name(name)} 已启动"
+        res = self._nssm(["start", self._service(name)])
+        out = (res.stdout.strip() or res.stderr.strip()).replace("\x00", "")
+        return out or f"{self._service(name)} 已启动"
 
     def stop(self, settings: Settings, name: str) -> str:
-        res = self._pm2(["stop", self._app_name(name)])
-        self._pm2(["save"])
-        return res.stdout.strip() or res.stderr.strip() or f"{self._app_name(name)} 已停止"
+        res = self._nssm(["stop", self._service(name)])
+        out = (res.stdout.strip() or res.stderr.strip()).replace("\x00", "")
+        return out or f"{self._service(name)} 已停止"
 
     def restart(self, settings: Settings, name: str) -> str:
-        res = self._pm2(["restart", self._app_name(name)])
-        return res.stdout.strip() or res.stderr.strip() or f"{self._app_name(name)} 已重启"
-
-    def _find(self, name: str) -> dict | None:
-        res = self._pm2(["jlist"])
-        try:
-            apps = json.loads(res.stdout or "[]")
-        except (json.JSONDecodeError, ValueError):
-            return None
-        target = self._app_name(name)
-        for app in apps if isinstance(apps, list) else []:
-            if app.get("name") == target:
-                return app
-        return None
+        res = self._nssm(["restart", self._service(name)])
+        out = (res.stdout.strip() or res.stderr.strip()).replace("\x00", "")
+        return out or f"{self._service(name)} 已重启"
 
     def status(self, settings: Settings, name: str) -> str:
-        app = self._find(name)
-        if app is None:
+        res = self._nssm(["status", self._service(name)])
+        # nssm may emit UTF-16 console text; strip embedded nulls before matching.
+        out = ((res.stdout or res.stderr) or "").replace("\x00", "").strip()
+        if res.returncode != 0 or not out:
             return "not installed"
-        return (app.get("pm2_env") or {}).get("status") or "unknown"
+        if "RUNNING" in out:
+            return "running"
+        if "STOPPED" in out:
+            return "stopped"
+        if "PAUSED" in out:
+            return "paused"
+        if "PENDING" in out:
+            return "pending"
+        return out or "unknown"
 
     def stats(self, settings: Settings, name: str) -> dict:
         st = _empty_stats()
-        app = self._find(name)
-        if app:
-            env = app.get("pm2_env") or {}
-            monit = app.get("monit") or {}
-            st["pid"] = app.get("pid") or None
-            st["running"] = env.get("status") == "online"
-            st["rss"] = monit.get("memory")
-            if st["rss"] is not None:
-                st["source"] = "pm2 monit.memory"
+        # nssm doesn't report pid/memory, so locate the python process actually
+        # serving this gateway and sum its WorkingSetSize (bytes).
+        procs = _query_gateway_processes(name)
+        if procs:
+            st["pid"] = procs[0][0]
+            st["rss"] = sum(ws for _, ws in procs)
+            st["running"] = True
+            st["source"] = "WorkingSetSize"
         return st
 
 
@@ -816,10 +774,10 @@ def get_manager() -> ServiceManager:
     elif system == "Darwin":
         mgr = LaunchdManager()
     elif system == "Windows":
-        # Prefer pm2 (as requested); fall back to a Scheduled Task when pm2 is
-        # not installed so the gateway still works out of the box.
-        pm2_mgr = Pm2WindowsManager()
-        mgr = pm2_mgr if pm2_mgr.available() else WindowsTaskManager()
+        # Prefer nssm (a real Windows service); fall back to a Scheduled Task
+        # when nssm is not installed so the gateway still works out of the box.
+        nssm_mgr = NssmWindowsManager()
+        mgr = nssm_mgr if nssm_mgr.available() else WindowsTaskManager()
     else:
         mgr = _NullManager()
     return mgr if mgr.available() else _NullManager()

@@ -134,9 +134,9 @@ command works on all three platforms, using each one's native service manager:
 | --- | --- | --- |
 | Linux | systemd **user** unit (`systemctl --user`) | `~/.config/systemd/user/ssr-gateway-<name>.service` |
 | macOS | launchd LaunchAgent (`launchctl`) | `~/Library/LaunchAgents/com.ssr.gateway.<name>.plist` |
-| Windows | **pm2** (with `pm2-windows-startup` for boot) | pm2 app `ssr-gateway-<name>` + `~/.ssr/gateways/<name>.pm2.json` |
+| Windows | **nssm** (a real Windows service, auto-start at boot) | service `ssr-gateway-<name>` (`nssm install`/`set`) |
 
-On Windows, if pm2 is not installed it falls back to a Scheduled Task at logon
+On Windows, if nssm is not installed it falls back to a Scheduled Task at logon
 (`schtasks`, `~/.ssr/gateways/<name>.cmd`).
 
 ```bash
@@ -154,8 +154,8 @@ ssr gateway uninstall name        # stop, remove the unit, drop the record
 ```
 
 Memory is read per platform: systemd's cgroup `MemoryCurrent` on Linux, `ps`
-RSS on macOS, and pm2's `monit.memory` (or the process `WorkingSetSize` under
-the Scheduled-Task fallback) on Windows. Install
+RSS on macOS, and the process `WorkingSetSize` on Windows (matched by command
+line, so it works under both nssm and the Scheduled-Task fallback). Install
 [`psutil`](https://pypi.org/project/psutil/) for thread counts and `--cpu`
 sampling (optional — it degrades gracefully without it).
 
@@ -167,14 +167,16 @@ installed with, and pins `SSR_HOME` so it finds your config and tokens.
 Notes:
 - **Linux:** user services stop when you log out unless lingering is enabled —
   run `loginctl enable-linger $USER` for always-on. Logs: `journalctl --user -u ssr-gateway-<name> -f`.
-- **Windows:** runs under **pm2** with restart guards (`min_uptime` /
-  `max_restarts` / exponential backoff, single fork instance) so a crashing
-  gateway can't spawn endlessly; `pm2 save` + `pm2-windows-startup` resurrect it
-  on boot. For boot persistence run once: `npm i -g pm2-windows-startup &&
-  pm2-startup install`. Output goes to `~/.ssr/logs/gateway-<name>.log`.
+- **Windows:** runs as a real Windows service via **nssm**, set to
+  `SERVICE_AUTO_START` so it comes up on boot, with a restart throttle
+  (`AppThrottle` 15s + `AppRestartDelay` 2s) so a crashing gateway can't spawn
+  endlessly. Installing/removing a service needs an **Administrator** terminal.
+  Get nssm from [nssm.cc](https://nssm.cc/) or `choco install nssm` /
+  `scoop install nssm`. Output goes to `~/.ssr/logs/gateway-<name>.log`; manage
+  it with `nssm status ssr-gateway-<name>` or `nssm edit ssr-gateway-<name>`.
 - **macOS:** stdout/stderr are written to `~/.ssr/logs/gateway-<name>.log`.
 - If no native manager is available (e.g. a minimal container), the gateway is
-  still saved and run-instructions are printed — use Docker or pm2 instead.
+  still saved and run-instructions are printed — use Docker or nssm instead.
 
 ### Docker deployment
 

@@ -137,35 +137,9 @@ def test_windows_status_stopped_vs_not_installed(monkeypatch, tmp_path):
     assert mgr._interpreter().endswith("pythonw.exe")
 
 
-def test_pm2_ecosystem_file_is_well_formed(tmp_path, monkeypatch):
-    import json
-
+def test_nssm_install_configures_service(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
-    record = gw.Gateway(name="box", channel="wechat", cwd="C:/work", env={"K": "V"})
-    monkeypatch.setattr(gw.sys, "executable", r"C:\Py\python.exe")
-    path = gw.Pm2WindowsManager()._write_ecosystem(settings, record)
-    assert path.suffix == ".json"
-    data = json.loads(path.read_text("utf-8"))
-    app = data["apps"][0]
-    assert app["name"] == "ssr-gateway-box"
-    assert app["script"] == r"C:\Py\python.exe"
-    assert app["args"] == ["-m", "ssr", "gateway", "run", "box"]
-    assert app["interpreter"] == "none"
-    assert app["cwd"] == "C:/work"
-    assert app["env"]["SSR_HOME"] == str(settings.home)
-    assert app["env"]["K"] == "V"
-    assert app["autorestart"] is True
-    # Restart guards prevent a tight infinite fork/restart loop.
-    assert app["min_uptime"] == "15s"
-    assert app["max_restarts"] == 5
-    assert app["exp_backoff_restart_delay"] == 200
-    assert app["instances"] == 1
-    assert app["exec_mode"] == "fork"
-
-
-def test_pm2_install_starts_and_saves(tmp_path, monkeypatch):
-    settings = _settings(tmp_path)
-    record = gw.Gateway(name="box", channel="feishu")
+    record = gw.Gateway(name="box", channel="feishu", cwd="C:/work", env={"K": "V"})
     import types
 
     calls = []
@@ -175,43 +149,78 @@ def test_pm2_install_starts_and_saves(tmp_path, monkeypatch):
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(gw, "_run", fake_run)
-    monkeypatch.setattr(gw, "_find_pm2", lambda: "pm2")
-    # Skip the (network) boot-service install in this unit test.
-    monkeypatch.setattr(gw.Pm2WindowsManager, "_ensure_boot_service", lambda self: "ok")
-    msg = gw.Pm2WindowsManager().install(settings, record, start=True)
+    monkeypatch.setattr(gw, "_find_nssm", lambda: "nssm")
+    monkeypatch.setattr(gw.sys, "executable", r"C:\Py\python.exe")
+    msg = gw.NssmWindowsManager().install(settings, record, start=True)
 
-    pm2_calls = [c[1:] for c in calls if c[0] == "pm2"]
-    assert ["delete", "ssr-gateway-box"] in pm2_calls
-    assert any(c[0] == "start" for c in pm2_calls)
-    assert ["save"] in pm2_calls
+    nssm_calls = [c[1:] for c in calls if c[0] == "nssm"]
+    # Old service is torn down first, then a fresh one is installed.
+    assert ["remove", "ssr-gateway-box", "confirm"] in nssm_calls
+    assert ["install", "ssr-gateway-box", r"C:\Py\python.exe",
+            "-m", "ssr", "gateway", "run", "box"] in nssm_calls
+    # Working dir, environment and auto-start are applied via `nssm set`.
+    assert ["set", "ssr-gateway-box", "AppDirectory", "C:/work"] in nssm_calls
+    assert ["set", "ssr-gateway-box", "AppEnvironmentExtra",
+            f"SSR_HOME={settings.home}", "K=V"] in nssm_calls
+    assert ["set", "ssr-gateway-box", "Start", "SERVICE_AUTO_START"] in nssm_calls
+    assert ["start", "ssr-gateway-box"] in nssm_calls
     assert "ssr-gateway-box" in msg
 
 
-def test_pm2_status_and_stats_parse_jlist(tmp_path, monkeypatch):
+def test_nssm_install_reports_permission_error(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
-    import json
+    record = gw.Gateway(name="box", channel="feishu")
     import types
 
-    jlist = json.dumps([
-        {"name": "ssr-gateway-box", "pid": 4242,
-         "pm2_env": {"status": "online"}, "monit": {"memory": 150, "cpu": 0}},
-        {"name": "other", "pid": 1, "pm2_env": {"status": "online"}, "monit": {}},
-    ])
-
     def fake_run(cmd, **kw):
-        if cmd[:2] == ["pm2", "jlist"]:
-            return types.SimpleNamespace(returncode=0, stdout=jlist, stderr="")
+        if cmd[1] == "install":
+            return types.SimpleNamespace(returncode=5, stdout="", stderr="Access is denied.")
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(gw, "_run", fake_run)
-    monkeypatch.setattr(gw, "_find_pm2", lambda: "pm2")
-    mgr = gw.Pm2WindowsManager()
-    assert mgr.status(settings, "box") == "online"
+    monkeypatch.setattr(gw, "_find_nssm", lambda: "nssm")
+    msg = gw.NssmWindowsManager().install(settings, record, start=True)
+    assert "失败" in msg
+    assert "管理员" in msg  # hints that elevation is required
+
+
+def test_nssm_status_maps_states(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    import types
+
+    state = {"out": "SERVICE_RUNNING", "rc": 0}
+
+    def fake_run(cmd, **kw):
+        if cmd[1] == "status":
+            return types.SimpleNamespace(returncode=state["rc"], stdout=state["out"], stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(gw, "_run", fake_run)
+    monkeypatch.setattr(gw, "_find_nssm", lambda: "nssm")
+    mgr = gw.NssmWindowsManager()
+    assert mgr.status(settings, "box") == "running"
+    # nssm sometimes emits UTF-16 console text (interleaved nulls) — still parsed.
+    state["out"] = "S\x00E\x00R\x00V\x00I\x00C\x00E\x00_\x00S\x00T\x00O\x00P\x00P\x00E\x00D\x00"
+    assert mgr.status(settings, "box") == "stopped"
+    state["rc"], state["out"] = 1, ""
+    assert mgr.status(settings, "box") == "not installed"
+
+
+def test_nssm_stats_detects_running_process(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    import types
+
+    def fake_run(cmd, **kw):
+        if cmd[0] == "powershell":
+            return types.SimpleNamespace(returncode=0, stdout="4242 100\n4243 50\n", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(gw, "_run", fake_run)
+    mgr = gw.NssmWindowsManager()
     st = mgr.stats(settings, "box")
     assert st["running"] is True
     assert st["pid"] == 4242
-    assert st["rss"] == 150
-    assert mgr.status(settings, "missing") == "not installed"
+    assert st["rss"] == 150  # summed working set
 
 
 def test_redirect_headless_output_when_no_console(tmp_path, monkeypatch):
@@ -253,13 +262,13 @@ def test_get_manager_matches_platform(monkeypatch):
     monkeypatch.setattr(gw.LaunchdManager, "available", lambda self: True)
     assert isinstance(gw.get_manager(), gw.LaunchdManager)
 
-    # Windows prefers pm2 when it is installed.
+    # Windows prefers nssm when it is installed.
     monkeypatch.setattr(gw.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(gw.Pm2WindowsManager, "available", lambda self: True)
-    assert isinstance(gw.get_manager(), gw.Pm2WindowsManager)
+    monkeypatch.setattr(gw.NssmWindowsManager, "available", lambda self: True)
+    assert isinstance(gw.get_manager(), gw.NssmWindowsManager)
 
-    # …and falls back to a Scheduled Task when pm2 is not on PATH.
-    monkeypatch.setattr(gw.Pm2WindowsManager, "available", lambda self: False)
+    # …and falls back to a Scheduled Task when nssm is not on PATH.
+    monkeypatch.setattr(gw.NssmWindowsManager, "available", lambda self: False)
     monkeypatch.setattr(gw.WindowsTaskManager, "available", lambda self: True)
     assert isinstance(gw.get_manager(), gw.WindowsTaskManager)
 

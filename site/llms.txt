@@ -15,7 +15,7 @@ Key facts for an LLM:
 - [Plugins & MCP](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Claude-Code-format plugins contribute MCP servers, merged with `~/.ssr/mcp.json`; shared credentials via `${namespace.key}`. Ships chrome-devtools. MCP tools surface as `mcp__<server>__<tool>`.
 - [Skills](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Discovered across `~/.agent`, `~/.codex`, `~/.gemini`, `~/.claude`, `~/.ssr`, plus installable built-in skills (incl. review-mode).
 - [Channels](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Feishu (Lark), WeChat, and the XiaoAI speaker (polls Mi cloud conversation history for ASR, replies via TTS — pauses playback first, uses MiIO play-text). `ssr channel login xiaomi --browser` harvests the token via the DevTools Protocol.
-- [Gateway](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Install a channel-bound instance as an OS service — systemd user unit (Linux), launchd (macOS), pm2 (Windows, with restart guards + boot persistence; falls back to a Scheduled Task).
+- [Gateway](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): Install a channel-bound instance as an OS service — systemd user unit (Linux), launchd (macOS), nssm (Windows, a real auto-start service with a restart throttle; falls back to a Scheduled Task).
 - [Multi-model & servers](https://github.com/NannaOlympicBroadcast/ssr-agent#readme): `ssr models config` (Gemini/Anthropic/OpenAI + fallbacks); `ssr serve` (OpenAI-compatible HTTP); `ssr --experimental-acp` (Agent Client Protocol over stdio); Docker via `Dockerfile`/`docker-compose.yml`.
 
 ## Commands

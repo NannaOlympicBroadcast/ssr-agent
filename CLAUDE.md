@@ -61,8 +61,9 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   servers are killed (no orphan leak) and children are tied to the parent via a
   Windows Job object), `gateway` (`ssr gateway` — installs a channel-bound
   instance as a **system service** per OS: systemd user unit / launchd plist /
-  **Windows pm2** (ecosystem file + restart guards + `pm2-windows-startup`;
-  falls back to a scheduled task if pm2 is absent); records in
+  **Windows nssm** (a real Windows service via `nssm install`/`set` —
+  `SERVICE_AUTO_START` + restart throttle; falls back to a scheduled task if
+  nssm is absent); records in
   `~/.ssr/gateways.json`, the service runs `ssr gateway run <name>`).
 - Container deployment: `Dockerfile` + `docker-compose.yml` (`SSR_HOME=/data/.ssr`
   on the `ssr-data` volume; entrypoint runs `ssr init` then `ssr <command>`).
