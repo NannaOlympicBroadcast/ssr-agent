@@ -100,13 +100,23 @@ class XiaomiChannel(AbstractChannel):
         self._speaker = speaker
         target = speaker.device.device_id
 
-        # Speak replies back through the speaker; bind the IM approval handler so
-        # /approve etc. work from voice/text out-of-band.
+        # Speak replies back through the speaker.
         def speak_sync(_target: str, text: str) -> None:
             if self._loop is not None:
                 asyncio.run_coroutine_threadsafe(speaker.speak(text), self._loop)
 
-        agent.toolkit.approval_handler = IMApprovalHandler(send_fn=speak_sync)
+        # A speaker has no usable approval UX — the poll loop is busy running the
+        # turn, so a spoken "/approve" can't be read until the turn ends and the
+        # request would just time out (deny). So auto-approve every command by
+        # default (cfg.auto_approve). Set "auto_approve": false in xiaomi.json to
+        # restore voice/out-of-band /approve prompts via TTS instead.
+        if getattr(cfg, "auto_approve", True):
+            from ssr.approval import AutoApprovalHandler
+
+            agent.toolkit.approval_handler = AutoApprovalHandler()
+            logger.info("auto-approve enabled: all commands run without confirmation")
+        else:
+            agent.toolkit.approval_handler = IMApprovalHandler(send_fn=speak_sync)
         agent.active_im_context = ("xiaomi", target)
 
         print(

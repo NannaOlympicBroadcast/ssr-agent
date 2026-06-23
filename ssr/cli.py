@@ -586,6 +586,89 @@ def ensure_bus_server(settings: Settings, console: Console | None = None) -> Non
     settings.bus_url = url
 
 
+def cmd_srdb(args, settings: Settings, console: Console) -> int:
+    """Connect to a running agent's srdb debug server over its tcp:// link."""
+    import json
+
+    from .srdb import SrdbClient, SrdbError
+
+    action = args.srdb_action
+    try:
+        client = SrdbClient(args.url).connect()
+    except Exception as e:
+        console.print(f"[red]Could not connect to srdb: {e}[/red]")
+        return 1
+    try:
+        if action == "agents":
+            for a in client.agents():
+                console.print(
+                    f"[cyan]{a['agent_id']}[/cyan] "
+                    f"channel={a.get('active_channel')} session={a.get('session_id')} "
+                    f"busy={a.get('busy')} model={a.get('model_primary')} "
+                    f"handlers={a.get('bus_handlers')} mcp={a.get('mcp_tools')}"
+                )
+            return 0
+        if action == "call":
+            params = {}
+            if args.params:
+                try:
+                    params = json.loads(args.params)
+                except json.JSONDecodeError:
+                    console.print("[red]params must be a JSON object[/red]")
+                    return 1
+            # Default the agent target to the link's ?agent= when not specified.
+            if client.agent_id and isinstance(params, dict) and "agent" not in params:
+                params["agent"] = client.agent_id
+            result = client.call(args.method, params)
+            console.print_json(json.dumps(result, ensure_ascii=False))
+            return 0
+        if action == "eval":
+            out = client.eval(args.code)
+            if out.get("stdout"):
+                console.print(out["stdout"], end="")
+            if out.get("result") is not None:
+                console.print(f"[green]{out['result']}[/green]")
+            if out.get("error"):
+                console.print(f"[red]{out['error']}[/red]")
+            return 0
+        if action == "send":
+            client.channel_send(args.channel, args.target, args.text)
+            console.print(f"[green]Sent[/green] to {args.channel}:{args.target}")
+            return 0
+        if action == "watch":
+            from rich.markup import escape
+
+            try:
+                here = [a["agent_id"] for a in client.agents()]
+                console.print(f"[dim]agents in this process: {', '.join(here) or '(none)'}[/dim]")
+            except SrdbError:
+                pass
+            tgt = args.agent or client.agent_id or "(first)"
+            console.print(
+                f"[dim]watching [bold]{tgt}[/bold]; live events appear when the agent "
+                f"is active (send it a message). Ctrl-C to stop.[/dim]"
+            )
+            try:
+                for frame in client.stream(args.agent):
+                    e = frame.get("event") or {}
+                    extra = {k: v for k, v in e.items() if k not in ("type", "agent")}
+                    detail = " ".join(f"{k}={str(v)[:160]}" for k, v in extra.items())
+                    console.print(
+                        f"[dim]{escape(frame.get('agent_id',''))}[/dim] "
+                        f"[cyan]{escape(str(e.get('type')))}[/cyan]"
+                        f"([magenta]{escape(str(e.get('agent')))}[/magenta]) {escape(detail)}"
+                    )
+            except KeyboardInterrupt:
+                pass
+            return 0
+    except SrdbError as e:
+        console.print(f"[red]srdb error {e.code}: {e.message}[/red]")
+        return 1
+    finally:
+        client.close()
+    return 0
+
+
 def cmd_bus(args, settings: Settings, console: Console) -> int:
     """Run / interact with the SSR event bus."""
     action = args.bus_action
@@ -1067,6 +1150,28 @@ def build_parser() -> argparse.ArgumentParser:
     gwrun = gwsub.add_parser("run", help="run a gateway in the foreground (used by the system service)")
     gwrun.add_argument("name")
 
+    # srdb — connect to a running agent's debug server
+    srdb = sub.add_parser("srdb", help="debug a running SSR agent via its tcp:// srdb link")
+    srdbsub = srdb.add_subparsers(dest="srdb_action", required=True)
+    srdb_ag = srdbsub.add_parser("agents", help="list agents on the srdb link")
+    srdb_ag.add_argument("url", help="tcp://host:port?key=… link printed by the agent")
+    srdb_call = srdbsub.add_parser("call", help="call an srdb method with JSON params")
+    srdb_call.add_argument("url")
+    srdb_call.add_argument("method", help="e.g. srdb.sessions, srdb.bus, srdb.channels")
+    srdb_call.add_argument("params", nargs="?", default="", help="JSON params object")
+    srdb_eval = srdbsub.add_parser("eval", help="run Python in the agent's runtime")
+    srdb_eval.add_argument("url")
+    srdb_eval.add_argument("code", help="Python expression or statements")
+    srdb_send = srdbsub.add_parser("send", help="send a message straight to a channel")
+    srdb_send.add_argument("url")
+    srdb_send.add_argument("channel", help="feishu | wechat | xiaomi")
+    srdb_send.add_argument("target", help="chat_id / user id / device id")
+    srdb_send.add_argument("text")
+    srdb_watch = srdbsub.add_parser("watch", help="stream a running agent's live activity (Ctrl-C to stop)")
+    srdb_watch.add_argument("url")
+    srdb_watch.add_argument("agent", nargs="?",
+                            help="agent id, or 'all'; default: the link's agent")
+
     return p
 
 
@@ -1112,7 +1217,7 @@ def main(argv: list[str] | None = None) -> int:
     # The main process hosts a non-blocking bus server so external scripts and
     # other agents can talk to this agent's bus. Skip it for commands that are
     # not running an agent (or are the bus server themselves).
-    if args.command not in ("init", "index", "bus", "task", "models"):
+    if args.command not in ("init", "index", "bus", "task", "models", "srdb"):
         ensure_bus_server(settings, console)
     if args.command == "init":
         return cmd_init(args, settings, console)
@@ -1136,6 +1241,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(args, settings, console)
     if args.command == "bus":
         return cmd_bus(args, settings, console)
+    if args.command == "srdb":
+        return cmd_srdb(args, settings, console)
     if args.command == "gateway":
         return cmd_gateway(args, settings, console)
 

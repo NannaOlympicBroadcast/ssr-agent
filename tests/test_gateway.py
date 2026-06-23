@@ -150,6 +150,7 @@ def test_nssm_install_configures_service(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gw, "_run", fake_run)
     monkeypatch.setattr(gw, "_find_nssm", lambda: "nssm")
+    monkeypatch.setattr(gw, "_inherited_proxy_env", dict)  # deterministic env
     monkeypatch.setattr(gw.sys, "executable", r"C:\Py\python.exe")
     msg = gw.NssmWindowsManager().install(settings, record, start=True)
 
@@ -165,6 +166,29 @@ def test_nssm_install_configures_service(tmp_path, monkeypatch):
     assert ["set", "ssr-gateway-box", "Start", "SERVICE_AUTO_START"] in nssm_calls
     assert ["start", "ssr-gateway-box"] in nssm_calls
     assert "ssr-gateway-box" in msg
+
+
+def test_service_env_inherits_proxy(tmp_path, monkeypatch):
+    # A background service doesn't get the user's shell proxy; capture it so the
+    # model provider (e.g. Gemini) can reach the API from inside the service.
+    settings = _settings(tmp_path)
+    record = gw.Gateway(name="box", channel="all", env={"K": "V"})
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    env = gw.service_env(settings, record)
+    assert env["SSR_HOME"] == str(settings.home)
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+    assert env["HTTP_PROXY"] == "http://127.0.0.1:7890"
+    assert env["K"] == "V"
+
+
+def test_service_env_gateway_overrides_inherited(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    record = gw.Gateway(name="box", channel="all", env={"HTTPS_PROXY": "http://other:1"})
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    env = gw.service_env(settings, record)
+    assert env["HTTPS_PROXY"] == "http://other:1"  # explicit gw.env wins
 
 
 def test_nssm_install_reports_permission_error(tmp_path, monkeypatch):
@@ -204,6 +228,41 @@ def test_nssm_status_maps_states(tmp_path, monkeypatch):
     assert mgr.status(settings, "box") == "stopped"
     state["rc"], state["out"] = 1, ""
     assert mgr.status(settings, "box") == "not installed"
+
+
+def test_nssm_handles_none_streams(tmp_path, monkeypatch):
+    # On a non-UTF-8 locale the subprocess reader thread can die and leave
+    # stdout/stderr as None; the manager must degrade instead of AttributeError.
+    settings = _settings(tmp_path)
+    import types
+
+    def fake_run(cmd, **kw):
+        return types.SimpleNamespace(returncode=0, stdout=None, stderr=None)
+
+    monkeypatch.setattr(gw, "_run", fake_run)
+    monkeypatch.setattr(gw, "_find_nssm", lambda: "nssm")
+    mgr = gw.NssmWindowsManager()
+    assert mgr.restart(settings, "box") == "ssr-gateway-box 已重启"
+    assert mgr.start(settings, "box") == "ssr-gateway-box 已启动"
+    assert mgr.stop(settings, "box") == "ssr-gateway-box 已停止"
+    # rc=0 but empty/None output → treated as a live service status query miss.
+    assert mgr.status(settings, "box") == "not installed"
+
+
+def test_run_forces_utf8_decoding(monkeypatch):
+    # _run must request UTF-8 + replacement so a GBK/locale codec can't crash the
+    # reader thread on nssm's non-locale bytes.
+    captured = {}
+
+    def fake_subprocess_run(cmd, **kw):
+        captured.update(kw)
+        import types
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(gw.subprocess, "run", fake_subprocess_run)
+    gw._run(["nssm", "status", "x"])
+    assert captured.get("encoding") == "utf-8"
+    assert captured.get("errors") == "replace"
 
 
 def test_nssm_stats_detects_running_process(tmp_path, monkeypatch):

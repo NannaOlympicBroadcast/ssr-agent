@@ -105,9 +105,15 @@ class FeishuChannel(AbstractChannel):
 
             threading.Thread(target=worker, daemon=True).start()
 
+        def on_message_read(data) -> None:
+            # Read receipts (im.message.message_read_v1) need no action; register a
+            # no-op so the dispatcher doesn't log "processor not found".
+            return None
+
         handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(on_message)
+            .register_p2_im_message_message_read_v1(on_message_read)
             .build()
         )
 

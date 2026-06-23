@@ -68,6 +68,45 @@ class SessionStore:
             return True
         return False
 
+    def replace(
+        self,
+        session_id: str,
+        turns: list[dict] | None = None,
+        title: str | None = None,
+        meta_updates: dict | None = None,
+    ) -> bool:
+        """Rewrite an existing session (used by srdb to edit a conversation).
+
+        ``turns`` (each ``{role, content, ts?}``) replaces all turns when given;
+        ``title`` / ``meta_updates`` patch the meta record. Returns False if the
+        session does not exist (this never creates one). The write is atomic via
+        a temp file + ``replace`` so a reader never sees a half-written file.
+        """
+        existing = self.get(session_id)
+        if existing is None:
+            return False
+        meta = {k: v for k, v in existing.items() if k != "turns"}
+        meta["type"] = "meta"
+        if title is not None:
+            meta["title"] = _clean_title(title)
+        if meta_updates:
+            meta.update(meta_updates)
+        new_turns = existing["turns"] if turns is None else turns
+        path = self._path(session_id)
+        tmp = path.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(meta, ensure_ascii=False) + "\n")
+            for t in new_turns:
+                rec = {
+                    "type": "turn",
+                    "ts": t.get("ts") or _now(),
+                    "role": t.get("role") or "user",
+                    "content": t.get("content") or "",
+                }
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        tmp.replace(path)
+        return True
+
     # ------------------------------------------------------------- accessors
     def list(self) -> list[dict]:
         """Return session metadata (newest first) with turn counts."""

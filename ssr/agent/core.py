@@ -76,10 +76,28 @@ class SSRAgent:
         # Interruption + concurrent side-question (/stop, /btw) coordination.
         self._stop_event = threading.Event()
         self._busy = threading.Event()
+        # Live event observers (e.g. srdb watchers). Notified by every _emit,
+        # independent of the TUI `on_event` (which is None for channel agents),
+        # so an agent's real-time activity can be streamed even headless.
+        self._event_observers: list = []
+        self._event_observers_lock = threading.Lock()
         # Built-in event bus. Every running agent owns one; it is optionally
         # bridged to a remote bus server (SSR_BUS_URL / settings.bus_url) so
         # agents, tasks and external programs can communicate asynchronously.
         self._init_bus()
+        # Register with the per-process srdb debug server (best-effort) and keep
+        # this agent's debug link. Never let debugging setup break the agent.
+        self.srdb_link = None
+        try:
+            from ..srdb import announce_link, ensure_server, register_agent
+
+            register_agent(self)
+            srv = ensure_server(self.settings)
+            if srv is not None:
+                self.srdb_link = srv.link(self.agent_id)
+                announce_link(self.srdb_link)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------- bus
     def _init_bus(self) -> None:
@@ -227,6 +245,12 @@ class SSRAgent:
         manager = getattr(self, "mcp_manager", None)
         if manager is not None:
             manager.shutdown()
+        try:
+            from ..srdb import unregister_agent
+
+            unregister_agent(self)
+        except Exception:
+            pass
 
     def __del__(self):  # best-effort; atexit in MCPManager is the real safety net
         try:
@@ -290,7 +314,20 @@ class SSRAgent:
             "4. 小爱音箱(XiaoAI speaker)只能播报文本语音，不支持发送图片和文件。"
             "如果用户需要发送文件，请询问用户：是否要将文件通过飞书转发。"
         )
-        
+
+        # Voice mode: when the live channel is the XiaoAI speaker, the reply is
+        # read aloud by TTS — so keep it short and use plain spoken language.
+        active = getattr(self, "active_im_context", None)
+        if active and active[0] == "xiaomi":
+            parts.append(
+                "\n## 语音播报模式（小爱音箱）\n"
+                "你的回复会被音箱用 TTS 朗读出来，因此：\n"
+                "- 简短作答：通常控制在 2-3 句话以内，先说结论，省略铺垫和寒暄。\n"
+                "- 只输出纯文本口语，不要使用任何 Markdown（不要 `*`、`#`、反引号、列表符号、链接语法、表格、代码块）。\n"
+                "- 需要罗列时用「第一…第二…」这类口语化表达，不要用项目符号或编号列表标记。\n"
+                "- 不要朗读 URL、文件路径或长串代码；改成一句话概括，必要时提示用户去关联设备查看。"
+            )
+
         # User defined rules from load_rules
         user_rules = load_rules(self.settings)
         if user_rules:
@@ -459,6 +496,9 @@ class SSRAgent:
         self.memory.log_turn("user", summary)
         self.ensure_session(summary)
         self._record_turn("user", summary)
+        # Surface the start of every turn so live watchers (srdb) see activity
+        # even for a plain Q&A that makes no tool calls.
+        self._emit("turn_start", tag="ssr", prompt=summary, channel=self.active_im_context)
         run_hooks(self.settings, "UserPromptSubmit", {"prompt": summary, "session_id": self.session_id})
 
         gp: list = []
@@ -494,6 +534,7 @@ class SSRAgent:
         self._history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
         self.memory.log_turn("assistant", reply)
         self._record_turn("assistant", reply)
+        self._emit("reply", tag="ssr", text=reply)
         run_hooks(self.settings, "Stop", {"reply": reply, "session_id": self.session_id})
         return reply
 
@@ -505,13 +546,33 @@ class SSRAgent:
         return self._client
 
     def _emit(self, kind: str, tag: str = "ssr", **fields) -> None:
-        """Push a streaming event to the TUI callback, if one is registered."""
-        if self.on_event is None:
-            return
-        try:
-            self.on_event({"type": kind, "agent": tag, **fields})
-        except Exception:
-            pass  # never let UI rendering break the agent loop
+        """Push a streaming event to the TUI callback and any live observers."""
+        event = {"type": kind, "agent": tag, **fields}
+        if self.on_event is not None:
+            try:
+                self.on_event(event)
+            except Exception:
+                pass  # never let UI rendering break the agent loop
+        observers = self._event_observers
+        if observers:
+            for cb in list(observers):
+                try:
+                    cb(event)
+                except Exception:
+                    pass
+
+    def add_event_observer(self, callback) -> None:
+        """Register a live-event observer (used by srdb to stream activity)."""
+        with self._event_observers_lock:
+            if callback not in self._event_observers:
+                self._event_observers.append(callback)
+
+    def remove_event_observer(self, callback) -> None:
+        with self._event_observers_lock:
+            try:
+                self._event_observers.remove(callback)
+            except ValueError:
+                pass
 
     def _mcp_tools_parameter(self):
         """Build (once) a genai ``Tool`` of function declarations for MCP tools.

@@ -270,9 +270,15 @@ def build_event_handler(settings: Settings, send_reply, fetch_resource=None):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def on_message_read(data) -> None:
+        # Read receipts (im.message.message_read_v1) carry no actionable payload;
+        # register a no-op so the dispatcher doesn't log "processor not found".
+        return None
+
     return (
         lark.EventDispatcherHandler.builder("", "")
         .register_p2_im_message_receive_v1(on_message)
+        .register_p2_im_message_message_read_v1(on_message_read)
         .build()
     )
 

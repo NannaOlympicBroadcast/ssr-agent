@@ -40,6 +40,22 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   `bus_remove_handler`, `bus_listeners`, `bus_history`. `push_notification` can
   target the `xiaomi` speaker (voice-only TTS). REPL `/bus`, CLI
   `ssr bus <serve|send|listen|status>` (all accept `--api-key`).
+- `ssr/srdb/` — the **agent debug server**. Every main-agent process opens one
+  `SrdbServer` (a TCP server speaking newline-delimited JSON-RPC 2.0 on an
+  OS-allocated port, key-authenticated). Each live `SSRAgent` self-registers
+  (`registry`) and advertises a `tcp://host:port?key=…&agent=<id>` link (printed
+  to **stderr** on creation, also `agent.srdb_link`). Lets a debugger inspect all
+  running agents / sub-agents (bus-handler agents) / sessions / channels / bus
+  state; **edit** sessions (`SessionStore.replace`), sub-agent config and bus
+  events; send a message straight to a channel; **`srdb.watch`** to stream an
+  agent's (and its sub-agents') real-time events (`turn_start`/`reply`/`thinking`/
+  `tool_call`/`tool_result`/`sub_agent`/`bus_event`) via a tap on `SSRAgent._emit`
+  (works even when the TUI `on_event` is unset, e.g. headless channels; `run_parts`
+  emits `turn_start`+`reply` so even a no-tool turn is visible); and **`srdb.eval`**
+  arbitrary Python in the live runtime (`agent`/`settings`/`bus` in scope).
+  `client.SrdbClient` is the sync client; CLI `ssr srdb
+  <agents|call|eval|send|watch> <tcp-link> …`. Bind is `127.0.0.1` only; disable
+  with `SSR_SRDB=0`, override `SSR_SRDB_HOST`/`_PORT`/`_KEY`.
 - `ssr/plugins.py` + `ssr/builtin_plugins/` — bundled *plugins* (Claude-Code
   `.claude-plugin/plugin.json` + `.mcp.json` format) that contribute MCP servers,
   merged with `~/.ssr/mcp.json`. Ships `chrome-devtools`; supports shared
@@ -48,7 +64,10 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr/channels/` — IM/voice channels: `feishu`, `wechat`, and `xiaomi` (XiaoAI
   speaker: polls the Mi cloud **conversation-history API** for speech and replies
   via TTS — pausing playback first, and using the MiIO `play-text` action where
-  MiNA `text_to_speech` silently no-ops). `ssr channel login xiaomi` does a
+  MiNA `text_to_speech` silently no-ops; markdown is stripped before TTS and the
+  reply is kept short. A speaker has no usable approval UX, so xiaomi
+  **auto-approves all commands by default** (`AutoApprovalHandler`); set
+  `"auto_approve": false` in `xiaomi.json` to restore TTS `/approve` prompts). `ssr channel login xiaomi` does a
   one-time interactive login that caches the passToken (so a headless gateway can
   log in without re-verification): `--browser` opens a real Chrome and harvests
   the token via the DevTools Protocol; `--pass-token/--user-id` import it from
@@ -73,6 +92,40 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - Degrade gracefully when optional deps / network are missing.
 - Persist durable facts via the `remember` tool → `memory.md`.
 
+## Debugging agents with srdb (do this first)
+When a bug involves a **running** agent — a channel not replying, a stuck turn, a
+sub-agent / bus handler misbehaving, wrong model/proxy in a gateway service — use
+**srdb** to inspect the *live* process instead of guessing from code or restarting.
+It beats `print`-debugging because the agent is already running with its real
+config, sessions, channels and bus.
+
+1. **Get the link.** Every agent prints `[srdb] debug this agent: tcp://127.0.0.1:<port>?key=…&agent=<id>`
+   to **stderr** at startup. For a gateway service it's in `~/.ssr/logs/gateway-<name>.log`
+   (grep `srdb`). No link in scope? Reproduce locally with `ssr ask "<prompt>"` or a
+   tiny script that builds `SSRAgent(load_settings())` and reads `agent.srdb_link`.
+2. **See what's live, in real time:**
+   - `ssr srdb agents <link>` — every agent/sub-agent in the process (busy, model,
+     session, handler/MCP counts).
+   - `ssr srdb watch <link> all` — **stream the turn as it happens**: `turn_start`
+     → `thinking` → `tool_call`/`tool_result` → `reply` (sub-agent events tagged
+     `sub`). Run this, then trigger the agent (send the channel a message) to watch
+     where a turn stalls or errors.
+   - `ssr srdb call <link> srdb.bus` / `srdb.channels` / `srdb.sessions` — bus
+     listeners & bridge, channel state, recorded sessions.
+3. **Poke the live runtime** with `ssr srdb eval <link> '<python>'` (`agent`,
+   `settings`, `bus` in scope). This is the fastest way to confirm a hypothesis —
+   e.g. check the real model chain / proxy the *service* sees:
+   `ssr srdb eval <link> 'agent.models_config.get_primary().id'`,
+   `ssr srdb eval <link> 'import os; (os.environ.get("HTTPS_PROXY"), os.environ.get("GEMINI_API_KEY")[:6])'`,
+   or drive a turn directly: `ssr srdb eval <link> 'agent.run("ping")'`.
+4. **Edit/inject to reproduce:** `srdb.session.edit` rewrites a transcript,
+   `srdb.bus.emit` injects an event to fire a handler, `ssr srdb send <link>
+   <channel> <target> <text>` posts straight to a channel.
+
+Rule of thumb: reproduce with `watch` + `eval` against the live agent, confirm the
+exact failing call/config there, *then* fix the code. srdb binds to loopback and
+needs the key; `srdb.eval` is full in-process Python, so it's debug-only.
+
 ## Useful commands
 - `ssr` — launch TUI
 - `ssr ask "<prompt>"` — one-shot
@@ -83,6 +136,10 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr channel config xiaomi` / `ssr channel on xiaomi` — XiaoAI speaker channel
 - `ssr bus serve` — run a remote bus server; `ssr bus send <topic> '<json>'` /
   `ssr bus listen '<pattern>'` / `ssr bus status` — talk to it from the CLI
+- `ssr srdb agents <tcp-link>` / `ssr srdb eval <tcp-link> '<python>'` /
+  `ssr srdb call <tcp-link> <method> '<json>'` / `ssr srdb send <tcp-link>
+  <channel> <target> <text>` — debug a running agent (link is printed on stderr
+  at agent startup, e.g. in the gateway log)
 - While the agent runs: `/stop` interrupts the task; `/btw <q>` answers a side
   question concurrently (isolated toolkit, no races). On an approval prompt,
   `/disallow <reason>` (or a typed reason in the TUI) is fed back to the model.

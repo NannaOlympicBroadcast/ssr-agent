@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -40,6 +41,7 @@ class XiaomiConfig:
     speakerName: str = ""           # device name in Mi Home, to disambiguate
     hardware: str = ""              # e.g. L05C
     wake_word: str = ""             # optional: only forward queries containing it
+    auto_approve: bool = True       # speaker has no good approval UX → allow all commands by default
     default_cwd: str = ""           # starting working directory (not a hard limit)
     tts_command: str = ""           # MiIO play-text action "siid-aiid" (e.g. "5-1"); auto by hardware if empty
     # Used by the bundled ``miot`` plugin's ${xiaomi.*} placeholders:
@@ -811,6 +813,8 @@ class XiaomiSpeaker:
         import asyncio
 
         assert self.device is not None
+        # Strip Markdown so the speaker reads prose, not literal */#/` symbols.
+        text = _strip_markdown_for_tts(text)
         if not text:
             return
         # XiaoAI TTS rejects very long strings; chunk on sentence boundaries.
@@ -946,6 +950,45 @@ async def _diagnose_login(account, cfg: XiaomiConfig) -> tuple[str | None, str]:
         )
         return None, reason
     return None, f"{generic}\n(code={code} {desc})"
+
+
+# Markdown → plain speech. XiaoAI's TTS would otherwise literally voice symbols
+# like ``*``, ``#`` and backticks, so flatten them before speaking.
+_MD_FENCE_RE = re.compile(r"```[^\n]*\n?|~~~[^\n]*\n?")        # fenced code blocks
+_MD_HR_RE = re.compile(r"(?m)^\s*([-*_])(?:\s*\1){2,}\s*$")    # --- *** ___ rules
+_MD_IMG_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")       # [text](url) / ![alt](url)
+_MD_REF_LINK_RE = re.compile(r"!?\[([^\]]*)\]\[[^\]]*\]")      # [text][ref]
+_MD_AUTOLINK_RE = re.compile(r"<((?:https?|mailto):[^>]+)>")   # <https://…>
+_MD_HEADING_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s*")          # # ## ### headings
+_MD_BLOCKQUOTE_RE = re.compile(r"(?m)^\s{0,3}>\s?")            # > blockquotes
+_MD_LIST_RE = re.compile(r"(?m)^\s*([-*+])\s+")               # - * + bullets
+_MD_TABLE_DELIM_RE = re.compile(r"(?m)^[\s:|]*-[\s:|-]*$")     # |---|:--:| table rules
+_HTML_TAG_RE = re.compile(r"<[^>]+>")                         # stray HTML tags
+_MD_EMPHASIS_RE = re.compile(r"\*{1,3}|_{1,3}|~{1,2}|`+")     # bold/italic/strike/code marks
+
+
+def _strip_markdown_for_tts(text: str) -> str:
+    """Flatten Markdown to plain prose so the speaker reads words, not symbols.
+
+    Links/images collapse to their visible text; code fences, headings, list and
+    blockquote markers, horizontal rules, emphasis marks, table pipes and stray
+    HTML tags are removed. Plain text is otherwise left untouched.
+    """
+    if not text:
+        return ""
+    t = _MD_FENCE_RE.sub("", text)
+    t = _MD_HR_RE.sub("", t)
+    t = _MD_AUTOLINK_RE.sub(r"\1", t)       # before HTML-tag stripping
+    t = _MD_IMG_LINK_RE.sub(r"\1", t)
+    t = _MD_REF_LINK_RE.sub(r"\1", t)
+    t = _MD_HEADING_RE.sub("", t)
+    t = _MD_BLOCKQUOTE_RE.sub("", t)
+    t = _MD_LIST_RE.sub("", t)
+    t = _MD_TABLE_DELIM_RE.sub("", t)       # drop |---|:--:| separator rows
+    t = _HTML_TAG_RE.sub("", t)
+    t = _MD_EMPHASIS_RE.sub("", t)
+    t = t.replace("|", " ")                 # table cell separators
+    return t.strip()
 
 
 def _chunk_for_tts(text: str, limit: int = 240) -> list[str]:

@@ -370,6 +370,44 @@ Every conversation turn — REPL, one-shot, or channel agent run — is
 recorded as an append-only `~/.ssr/sessions/<id>.jsonl` transcript. List them in
 the TUI with `/sessions`; `/clear` starts a fresh session.
 
+### srdb — agent debugger (`ssr srdb`)
+
+Every running main-agent process opens a small **srdb** debug server (TCP,
+newline-delimited JSON-RPC 2.0, key-authenticated, bound to `127.0.0.1`). Each
+live agent prints a debug link to **stderr** on startup (and exposes it as
+`agent.srdb_link`):
+
+```
+[srdb] debug this agent: tcp://127.0.0.1:52017?key=…&agent=agent:0860fea3
+```
+
+Connect to it to inspect and steer the live process — across **all** agents and
+sub-agents running in it:
+
+```bash
+ssr srdb agents  tcp://127.0.0.1:52017?key=…      # list running agents
+ssr srdb call    tcp://…  srdb.sessions            # sessions / subagents / channels / bus
+ssr srdb call    tcp://…  srdb.session.edit '{"id":"…","title":"x","turns":[…]}'
+ssr srdb call    tcp://…  srdb.bus.emit '{"topic":"demo.ping","payload":{}}'
+ssr srdb send    tcp://…  feishu <chat_id> "hi"    # message a channel directly
+ssr srdb eval    tcp://…  'agent.run("status report")'   # run Python in the runtime
+ssr srdb watch   tcp://…  [agent|all]              # stream live activity in real time
+```
+
+`ssr srdb watch` tails an agent's **real-time** activity — `turn_start`, the
+final `reply`, and every `thinking` / `tool_call` / `tool_result` / `sub_agent` /
+`bus_event` in between — so you can see exactly what a main agent (and its
+sub-agents, tagged `sub`) is doing right now, even in a headless gateway. Events
+are pushed live from the moment you subscribe; trigger the agent (send it a
+message) to see a turn flow through.
+
+Methods: `srdb.agents` / `srdb.agent`, `srdb.sessions` / `srdb.session.get` /
+`srdb.session.edit`, `srdb.subagents` / `srdb.subagent.edit`, `srdb.channels` /
+`srdb.channel.send`, `srdb.bus` / `srdb.bus.history` / `srdb.bus.emit`,
+`srdb.watch` / `srdb.unwatch` (live event stream), and `srdb.eval`. Because `srdb.eval` runs arbitrary in-process Python, the key is a
+password — keep the server on loopback. Disable with `SSR_SRDB=0`; override with
+`SSR_SRDB_HOST` / `SSR_SRDB_PORT` / `SSR_SRDB_KEY`.
+
 ### Slash commands (inside the TUI)
 `/help` `/index [category]` `/status` `/context <mode> <query>`
 `/attach <path> [prompt]` (image/audio input; aliases `/image` `/audio`)

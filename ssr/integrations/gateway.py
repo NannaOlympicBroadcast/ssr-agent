@@ -168,6 +168,33 @@ def _exec_args(name: str) -> list[str]:
     return [sys.executable, "-m", "ssr", "gateway", "run", name]
 
 
+# Proxy vars a system service must inherit. A background service does NOT pick up
+# the user's shell proxy, but the model provider (e.g. Gemini, blocked in some
+# regions) may need it to reach the API — without it the agent silently fails
+# every turn. Captured at install time so the gateway can phone home.
+_PROXY_ENV_KEYS = (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+)
+
+
+def _inherited_proxy_env() -> dict[str, str]:
+    """The proxy-related variables currently set in this process's environment."""
+    return {k: os.environ[k] for k in _PROXY_ENV_KEYS if os.environ.get(k)}
+
+
+def service_env(settings: Settings, gw: "Gateway") -> dict[str, str]:
+    """Full environment for the gateway service.
+
+    ``SSR_HOME`` + inherited proxy vars + the gateway's own ``env`` (which wins on
+    conflict, so a user can override the captured proxy).
+    """
+    env = {"SSR_HOME": str(settings.home)}
+    env.update(_inherited_proxy_env())
+    env.update(gw.env or {})
+    return env
+
+
 def format_bytes(n: int | None) -> str:
     """Human-readable byte size (e.g. ``142.3 MB``); ``-`` for unknown."""
     if n is None:
@@ -255,7 +282,23 @@ class _NullManager(ServiceManager):
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    # Force UTF-8 decoding with replacement: on a non-UTF-8 locale (e.g. GBK on
+    # Chinese Windows) the default codec chokes on nssm's UTF-16/non-locale bytes
+    # and the subprocess reader thread dies, leaving stdout/stderr as None.
+    kw.setdefault("encoding", "utf-8")
+    kw.setdefault("errors", "replace")
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def _out(res: subprocess.CompletedProcess) -> str:
+    """First non-empty of stdout/stderr — NUL-stripped, trimmed, None-safe.
+
+    nssm may emit UTF-16 console text (interleaved NULs) and, on a decode error,
+    a stream can be ``None``; normalize both here so callers never crash.
+    """
+    out = (res.stdout or "").replace("\x00", "").strip()
+    err = (res.stderr or "").replace("\x00", "").strip()
+    return out or err
 
 
 _NSSM_PATH_CACHE: list = []  # memoized [path|None] for this process
@@ -325,9 +368,7 @@ class SystemdManager(ServiceManager):
 
     def _unit_text(self, settings: Settings, gw: Gateway) -> str:
         workdir = gw.cwd or str(Path.home())
-        env_lines = [f"Environment=SSR_HOME={settings.home}"]
-        for k, v in (gw.env or {}).items():
-            env_lines.append(f"Environment={k}={v}")
+        env_lines = [f"Environment={k}={v}" for k, v in service_env(settings, gw).items()]
         exec_start = " ".join(_exec_args(gw.name))
         return (
             "[Unit]\n"
@@ -424,7 +465,7 @@ class LaunchdManager(ServiceManager):
 
     def _plist_text(self, settings: Settings, gw: Gateway) -> str:
         args = "".join(f"\n    <string>{a}</string>" for a in _exec_args(gw.name))
-        env = {"SSR_HOME": str(settings.home), **(gw.env or {})}
+        env = service_env(settings, gw)
         env_xml = "".join(f"\n    <key>{k}</key><string>{v}</string>" for k, v in env.items())
         logs = logs_dir(settings)
         workdir = gw.cwd or str(Path.home())
@@ -541,8 +582,8 @@ class WindowsTaskManager(ServiceManager):
         path = self._wrapper_path(settings, gw.name)
         exe = self._interpreter()
         log = logs_dir(settings) / f"gateway-{gw.name}.log"
-        lines = ["@echo off", f'set "SSR_HOME={settings.home}"']
-        for k, v in (gw.env or {}).items():
+        lines = ["@echo off"]
+        for k, v in service_env(settings, gw).items():
             lines.append(f'set "{k}={v}"')
         if gw.cwd:
             lines.append(f'cd /d "{gw.cwd}"')
@@ -653,14 +694,14 @@ class NssmWindowsManager(ServiceManager):
         self._nssm(["remove", svc, "confirm"])
         res = self._nssm(["install", svc, sys.executable, "-m", "ssr", "gateway", "run", gw.name])
         if res.returncode != 0:
-            err = (res.stderr.strip() or res.stdout.strip()).replace("\x00", "")
+            err = _out(res)
             hint = ""
             if "denied" in err.lower() or "administrator" in err.lower():
                 hint = "\n（注册 Windows 服务需要管理员权限，请在管理员终端中重试。）"
             return f"[!] nssm install 失败：{err}{hint}"
         self._set(svc, "AppDirectory", gw.cwd or str(Path.home()))
         # AppEnvironmentExtra takes one KEY=VALUE per argument.
-        env = {"SSR_HOME": str(settings.home), **(gw.env or {})}
+        env = service_env(settings, gw)
         self._set(svc, "AppEnvironmentExtra", *[f"{k}={v}" for k, v in env.items()])
         self._set(svc, "AppStdout", log)
         self._set(svc, "AppStderr", log)
@@ -680,7 +721,7 @@ class NssmWindowsManager(ServiceManager):
         if start:
             r = self._nssm(["start", svc])
             if r.returncode != 0:
-                msg += f"\n[!] 启动失败：{(r.stderr.strip() or r.stdout.strip()).replace(chr(0), '')}"
+                msg += f"\n[!] 启动失败：{_out(r)}"
             else:
                 msg += "\n已立即启动。"
         return msg
@@ -694,28 +735,24 @@ class NssmWindowsManager(ServiceManager):
                        settings.home / "gateways" / f"{name}.pm2.json"):
             if legacy.exists():
                 legacy.unlink()
-        out = (res.stdout.strip() or res.stderr.strip()).replace("\x00", "")
-        return out or f"已移除 Windows 服务 {svc}。"
+        return _out(res) or f"已移除 Windows 服务 {svc}。"
 
     def start(self, settings: Settings, name: str) -> str:
         res = self._nssm(["start", self._service(name)])
-        out = (res.stdout.strip() or res.stderr.strip()).replace("\x00", "")
-        return out or f"{self._service(name)} 已启动"
+        return _out(res) or f"{self._service(name)} 已启动"
 
     def stop(self, settings: Settings, name: str) -> str:
         res = self._nssm(["stop", self._service(name)])
-        out = (res.stdout.strip() or res.stderr.strip()).replace("\x00", "")
-        return out or f"{self._service(name)} 已停止"
+        return _out(res) or f"{self._service(name)} 已停止"
 
     def restart(self, settings: Settings, name: str) -> str:
         res = self._nssm(["restart", self._service(name)])
-        out = (res.stdout.strip() or res.stderr.strip()).replace("\x00", "")
-        return out or f"{self._service(name)} 已重启"
+        return _out(res) or f"{self._service(name)} 已重启"
 
     def status(self, settings: Settings, name: str) -> str:
         res = self._nssm(["status", self._service(name)])
         # nssm may emit UTF-16 console text; strip embedded nulls before matching.
-        out = ((res.stdout or res.stderr) or "").replace("\x00", "").strip()
+        out = _out(res)
         if res.returncode != 0 or not out:
             return "not installed"
         if "RUNNING" in out:
