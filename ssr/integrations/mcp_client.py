@@ -45,7 +45,7 @@ from typing import Any, Optional
 _LOGGER = logging.getLogger("ssr.mcp")
 
 PROTOCOL_VERSION = "2024-11-05"
-_DEFAULT_TIMEOUT = 30.0
+_DEFAULT_TIMEOUT = 120.0  # generous: some MCP servers (e.g. miot) do heavy init
 _QUALIFIED_SEP = "__"
 
 
