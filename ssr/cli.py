@@ -797,6 +797,29 @@ def cmd_serve(args, settings: Settings, console: Console) -> int:
     return 0
 
 
+def cmd_arm(args, settings: Settings, console: Console) -> int:
+    """Drive the real OpenArm/Isaac bridge by natural language over the bus.
+
+    The agent discovers the arm's advertised skills (arm_describe) and plans the
+    instruction itself. The environment side (the Isaac Lab bridge) must be
+    running and connected to the same bus server — see
+    openarm_isaac_lab/scripts/ssr_bridge.
+    """
+    from .robotics import demo
+
+    if args.arm_action != "do":
+        console.print("[red]unknown arm action[/red]")
+        return 2
+
+    if "GEMINI_API_KEY" in missing_required(settings):
+        console.print("[red]GEMINI_API_KEY not set — configure ~/.ssr/.env[/red]")
+        return 1
+    console.print(f"[bold]OpenArm — executing instruction:[/bold] {args.instruction}")
+    return demo.run_instruction(settings, instruction=args.instruction,
+                                bus_url=args.bus_url, timeout=args.timeout,
+                                console=console)
+
+
 class WindowsStdinReader:
     def __init__(self):
         self.buffer = []
@@ -1103,6 +1126,15 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host to bind the server to")
     serve.add_argument("--port", type=int, default=8000, help="port to bind the server to")
 
+    arm = sub.add_parser("arm", help="drive an Isaac Lab / OpenArm robot by natural language over the bus")
+    asub = arm.add_subparsers(dest="arm_action", required=True)
+    ado = asub.add_parser("do", help="carry out a natural-language instruction with the arm")
+    ado.add_argument("instruction", help='e.g. "帮我把苹果放到橘子上"')
+    ado.add_argument("--bus-url", default=None,
+                     help="ws:// bus server the Isaac bridge connects to "
+                          "(defaults to settings.bus_url / the embedded server)")
+    ado.add_argument("--timeout", type=float, default=180.0, help="seconds to wait")
+
     bus = sub.add_parser("bus", help="run / talk to the async event bus (JSON-RPC over WebSocket)")
     bsub = bus.add_subparsers(dest="bus_action", required=True)
     bserve = bsub.add_parser("serve", help="run a remote bus server")
@@ -1239,6 +1271,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_models(args, settings, console)
     if args.command == "serve":
         return cmd_serve(args, settings, console)
+    if args.command == "arm":
+        return cmd_arm(args, settings, console)
     if args.command == "bus":
         return cmd_bus(args, settings, console)
     if args.command == "srdb":
