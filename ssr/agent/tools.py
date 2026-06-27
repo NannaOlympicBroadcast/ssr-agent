@@ -77,6 +77,7 @@ class ToolKit:
         self.permission_manager = PermissionManager(settings)
         self.approval_handler = TUIApprovalHandler()
         self.approval_handler.toolkit = self
+        self._arm_tools = None  # lazily-built robotics ArmTools (needs agent bus)
 
 
     # -------------------------------------------------------------- approvals
@@ -513,6 +514,15 @@ class ToolKit:
         counts = self.retriever.reindex(cats)
         return "Reindexed: " + ", ".join(f"{k}={v}" for k, v in counts.items())
 
+    # ----------------------------------------------------------------- arm
+    def arm_tools(self):
+        """Return (building once) the robotics :class:`ArmTools` bound to self."""
+        if self._arm_tools is None:
+            from ..robotics.tools import ArmTools
+
+            self._arm_tools = ArmTools(self)
+        return self._arm_tools
+
     # ------------------------------------------------------------- collection
     def callables(self) -> list:
         return [
@@ -539,6 +549,7 @@ class ToolKit:
             self.bus_remove_handler,
             self.bus_listeners,
             self.bus_history,
+            *self.arm_tools().callables(),
         ]
 
     def specs(self) -> list[dict]:

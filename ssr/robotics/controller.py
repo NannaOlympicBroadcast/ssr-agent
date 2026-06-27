@@ -1,0 +1,101 @@
+"""Agent-side arm controller: discover capabilities, invoke skills, cache state.
+
+An :class:`ArmController` is a thin shim over an agent's in-process
+:class:`~ssr.bus.core.MessageBus` (bridged to the bus server the robot connects
+to). It never blocks: it *publishes* a request and returns immediately, and it
+caches the robot's capability descriptor and the latest scene snapshot delivered
+by ``arm.capabilities`` / ``arm.*.completed`` / ``arm.state`` so the tools (and
+the woken checker turn) can read them synchronously.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+
+from ..bus.core import MessageBus
+from ..bus.events import BusEvent
+from . import protocol as P
+
+
+class ArmController:
+    def __init__(self, bus: MessageBus, source: str = "ssr-brain"):
+        self.bus = bus
+        self.source = source
+        self._lock = threading.Lock()
+        self._caps: dict | None = None
+        self._last_completion: dict | None = None
+        self._last_state: dict | None = None
+        self._episode = 0
+        self.bus.subscribe(P.TOPIC_CAPS, self._on_caps)
+        self.bus.subscribe(P.TOPIC_GRASP_COMPLETED, self._on_completion)
+        self.bus.subscribe(P.TOPIC_ACTION_COMPLETED, self._on_completion)
+        self.bus.subscribe(P.TOPIC_STATE, self._on_state)
+
+    # ------------------------------------------------------------- listeners
+    def _on_caps(self, ev: BusEvent) -> None:
+        with self._lock:
+            self._caps = dict(ev.payload)
+
+    def _on_completion(self, ev: BusEvent) -> None:
+        with self._lock:
+            self._last_completion = dict(ev.payload)
+
+    def _on_state(self, ev: BusEvent) -> None:
+        with self._lock:
+            self._last_state = dict(ev.payload)
+
+    # --------------------------------------------------------------- publish
+    def request_capabilities(self, wait: float = 0.0) -> dict | None:
+        self.bus.publish(P.TOPIC_CAPS_REQUEST, {}, source=self.source)
+        if wait > 0:
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                if self.capabilities():
+                    break
+                time.sleep(0.05)
+        return self.capabilities()
+
+    def reset(self) -> str:
+        with self._lock:
+            self._episode += 1
+            self._last_completion = None
+            ep = self._episode
+        self.bus.publish(P.TOPIC_RESET, {"episode": ep}, source=self.source)
+        return f"episode {ep}"
+
+    def execute(self, req: P.ArmActionRequest) -> str:
+        """Publish a skill invocation; returns the assigned seq_id immediately."""
+        if not req.seq_id:
+            req.seq_id = uuid.uuid4().hex[:10]
+        with self._lock:
+            req.episode = self._episode or 1
+        self.bus.publish(P.TOPIC_ACTION_EXECUTE, req.to_payload(), source=self.source)
+        return req.seq_id
+
+    def request_state(self) -> None:
+        self.bus.publish(P.TOPIC_STATE_REQUEST, {}, source=self.source)
+
+    # ----------------------------------------------------------------- read
+    @property
+    def episode(self) -> int:
+        with self._lock:
+            return self._episode
+
+    def capabilities(self) -> dict | None:
+        with self._lock:
+            return dict(self._caps) if self._caps else None
+
+    def last_completion(self) -> dict | None:
+        with self._lock:
+            return dict(self._last_completion) if self._last_completion else None
+
+    def last_state(self) -> dict | None:
+        with self._lock:
+            return dict(self._last_state) if self._last_state else None
+
+    def latest(self) -> dict | None:
+        """Most recent scene snapshot from any source (completion or state)."""
+        with self._lock:
+            return dict(self._last_completion or self._last_state or {}) or None
