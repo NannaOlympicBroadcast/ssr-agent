@@ -184,6 +184,49 @@ def test_client_wait_for(bus_server):
     pub.close()
 
 
+def test_client_reconnects_after_connection_drop(bus_server):
+    """A dead connection (server bounce, network blip) must not strand the
+    client: RPCs made during the gap should fail fast (not hang for the ~20s
+    outer timeout), and the client should transparently reconnect and replay
+    its subscriptions once the network is back, with no caller intervention.
+    """
+    url = bus_server
+    received = []
+    client = BusClient(url, source="dropper").connect()
+    client.subscribe("ping.*", received.append)
+    time.sleep(0.1)
+
+    # Simulate the connection dying out from under the client (it never called
+    # close() itself) -- e.g. a server restart or a network blip.
+    asyncio.run_coroutine_threadsafe(client._ws.close(), client._loop).result(5)
+
+    start = time.monotonic()
+    with pytest.raises(Exception):
+        client.publish("ping.during_drop", {})
+    assert time.monotonic() - start < 5, "RPC during a drop must fail fast, not hang"
+
+    # The background reconnect loop (1s initial backoff) should bring the
+    # client back -- including its subscription -- without the caller doing
+    # anything. Retry the publish (not just the check) since each attempt is a
+    # fire-and-forget broadcast: one landing before resubscription finishes
+    # would otherwise be lost forever.
+    other = BusClient(url, source="other").connect()
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and not received:
+        try:
+            other.publish("ping.after_reconnect", {})
+        except Exception:
+            pass
+        time.sleep(0.3)
+
+    assert received and received[0].topic == "ping.after_reconnect", (
+        "client did not reconnect and replay its subscription"
+    )
+
+    client.close()
+    other.close()
+
+
 def test_remote_bridge_between_two_buses(bus_server):
     """Two independent in-process buses share events through the server."""
     url = bus_server

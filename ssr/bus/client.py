@@ -81,13 +81,64 @@ class BusClient:
             self._ready.set()
 
     async def _main(self) -> None:
+        # A dropped connection (server restart, network blip, laptop sleep) must
+        # not strand the client forever: without this loop, self._ws/self._loop
+        # stay set to dead objects and every future _call() blocks for the full
+        # outer timeout (~20s) only to raise a bare, blank-stringed TimeoutError.
         import websockets
 
-        async with websockets.connect(self.url, max_size=8 * 1024 * 1024) as ws:
-            self._ws = ws
-            self._ready.set()
-            async for raw in ws:
-                await self._on_message(raw)
+        backoff = 1.0
+        connected_once = False
+        while not self._closed:
+            try:
+                async with websockets.connect(self.url, max_size=8 * 1024 * 1024) as ws:
+                    self._ws = ws
+                    self._ready.set()
+                    if connected_once:
+                        print(f"[bus-client] reconnected to {self.url}")
+                        # Don't await this directly: its RPC replies only get
+                        # resolved by _on_message, which only runs once the
+                        # receive loop below is pumping. Run it concurrently.
+                        asyncio.ensure_future(self._resume_session())
+                    connected_once = True
+                    backoff = 1.0
+                    async for raw in ws:
+                        await self._on_message(raw)
+            except Exception as e:
+                if not connected_once:
+                    self._connect_error = e
+                    self._ready.set()
+                    return
+                print(f"[bus-client] connection to {self.url} lost ({e!r}); reconnecting...")
+            self._ws = None
+            self._fail_pending(ConnectionError(f"bus connection to {self.url} lost"))
+            if self._closed:
+                return
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+
+    async def _resume_session(self) -> None:
+        """Re-authenticate and re-subscribe after a dropped connection reconnects.
+
+        Subscriptions live on the server-side peer object, so a fresh connection
+        starts with none; replay every pattern we're still tracking locally.
+        """
+        if self.api_key:
+            try:
+                await self._rpc("bus.auth", {"key": self.api_key})
+            except Exception:
+                pass
+        for pattern, _handler in list(self._handlers.values()):
+            try:
+                await self._rpc("bus.subscribe", {"pattern": pattern})
+            except Exception:
+                pass
+
+    def _fail_pending(self, exc: Exception) -> None:
+        pending, self._pending = self._pending, {}
+        for fut in pending.values():
+            if not fut.done():
+                fut.set_exception(exc)
 
     async def _on_message(self, raw: str) -> None:
         try:
@@ -109,23 +160,30 @@ class BusClient:
                         pass
 
     # --------------------------------------------------------------- rpc
-    def _call(self, method: str, params: dict, timeout: float = 15.0) -> dict:
-        if self._loop is None or self._ws is None:
+    async def _rpc(self, method: str, params: dict, timeout: float = 15.0) -> dict:
+        """Send one request and await its reply. Runs on the client's own loop —
+        call directly from loop-thread code (e.g. ``_resume_session``), or via
+        :meth:`_call` from any other thread."""
+        if self._ws is None:
             raise RuntimeError("bus client is not connected")
         rid = uuid.uuid4().hex
-
-        async def _send_and_wait():
-            fut = self._loop.create_future()
-            self._pending[rid] = fut
+        fut = self._loop.create_future()
+        self._pending[rid] = fut
+        try:
             await self._ws.send(jsonrpc.dumps(jsonrpc.request(method, params, id=rid)))
-            return await asyncio.wait_for(fut, timeout)
-
-        future = asyncio.run_coroutine_threadsafe(_send_and_wait(), self._loop)
-        msg = future.result(timeout + 5)
+            msg = await asyncio.wait_for(fut, timeout)
+        finally:
+            self._pending.pop(rid, None)
         if "error" in msg:
             err = msg["error"]
             raise jsonrpc.JsonRpcError(err.get("code", jsonrpc.BUS_ERROR), err.get("message", "bus error"))
         return msg.get("result") or {}
+
+    def _call(self, method: str, params: dict, timeout: float = 15.0) -> dict:
+        if self._loop is None:
+            raise RuntimeError("bus client is not connected")
+        future = asyncio.run_coroutine_threadsafe(self._rpc(method, params, timeout), self._loop)
+        return future.result(timeout + 5)
 
     # ------------------------------------------------------------- public
     def publish(
