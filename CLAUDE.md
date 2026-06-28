@@ -75,9 +75,10 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   (`plugins/skills`) are bundled into `ssr/builtin_skills/miloco-*` as the
   agent's knowledge base (plus a `miloco-overview` adapter mapping them to the
   `miloco_*` tools); a **bus event source**
-  (`MilocoActivityBridge` polls Miloco activities and republishes each as a
-  `miloco.activity.<type>` event, de-duped, so handler agents react to what
-  happens at home); and a **persistent context** snapshot
+  (`MilocoActivityBridge` streams Miloco activities over **SSE**
+  (`/api/events/stream`, polling fallback + reconnect backfill) and republishes
+  each as a `miloco.activity.<type>` event, de-duped, so handler agents react in
+  real time to what happens at home); and a **persistent context** snapshot
   (`ssr miloco sync` → `~/.ssr/miloco/snapshot.json`, surfaced as REFS items by
   `load_miloco_context`). CLI: `ssr miloco <config|status|sync|devices|family|
   activities|automations|bridge>`. Miloco runs natively on macOS/Linux only; on

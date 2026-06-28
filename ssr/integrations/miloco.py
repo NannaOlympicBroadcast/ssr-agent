@@ -68,6 +68,7 @@ DEFAULT_ENDPOINTS: dict[str, str] = {
     "scene_trigger": "/api/miot/scenes/{scene_id}/trigger",  # POST, run a manual scene
     "members": "/api/identity/persons",                # GET, recognised family persons
     "activities": "/api/events",                       # GET, meaningful home events
+    "events_stream": "/api/events/stream",             # GET, SSE stream of new events
     "automations": "/api/rules",                       # GET, Miloco automation rules
     "tasks": "/api/tasks",                             # GET, persistent home tasks
     "home_profile": "/api/home-profile/rendered",      # GET, rendered home memory/profile
@@ -86,7 +87,8 @@ class MilocoConfig:
     base_url: str = DEFAULT_BASE_URL
     api_key: str = ""              # optional bearer token for the Miloco API
     timeout: float = 10.0
-    poll_interval: float = 5.0     # activity-bridge poll cadence (seconds)
+    use_sse: bool = True           # stream events via SSE (real-time); poll as fallback
+    poll_interval: float = 5.0     # activity-bridge poll cadence / SSE retry backoff (seconds)
     activity_limit: int = 50       # max activities fetched per poll
     home_id: str = ""              # optional: restrict to one home
     bus_topic_prefix: str = "miloco.activity"
@@ -443,13 +445,17 @@ PublishFn = Callable[[str, dict], None]
 
 
 class MilocoActivityBridge:
-    """Poll Miloco activities and republish each as an SSR bus event.
+    """Stream Miloco activities and republish each as an SSR bus event.
 
-    ``publish(topic, payload)`` is supplied by the caller so the same bridge
-    works against an in-process :class:`~ssr.bus.core.MessageBus` or a remote
-    :class:`~ssr.bus.client.BusClient`. Events are de-duplicated by activity id
-    (persisted across restarts in ``~/.ssr/miloco/bridge-state.json``) so a
-    restart does not replay the whole backlog.
+    By default it consumes Miloco's **SSE** event stream (``/api/events/stream``)
+    for real-time, low-latency delivery, and falls back to **polling**
+    (``/api/events``) when the stream is unavailable or drops. On every
+    (re)connect it first polls to backfill any gap, so no event is missed across
+    a reconnect. ``publish(topic, payload)`` is supplied by the caller so the
+    same bridge works against an in-process :class:`~ssr.bus.core.MessageBus` or
+    a remote :class:`~ssr.bus.client.BusClient`. Events are de-duplicated by
+    activity id (persisted across restarts in ``~/.ssr/miloco/bridge-state.json``)
+    so neither a reconnect nor a restart replays an event.
     """
 
     def __init__(
@@ -486,7 +492,27 @@ class MilocoActivityBridge:
         except OSError:
             pass
 
-    # -- polling
+    # -- publish one activity (shared by poll + SSE; de-dups and tracks state)
+    def _publish_activity(self, act: dict) -> bool:
+        """Publish one activity if unseen. Returns True if it was published."""
+        if not isinstance(act, dict):
+            return False
+        aid = _activity_id(act)
+        if aid in self._seen:
+            return False
+        self._seen.add(aid)
+        ts = float(act.get("timestamp") or act.get("time") or 0.0) or time.time() * 1000
+        self._last_ts = max(self._last_ts, ts)
+        topic = f"{self.cfg.bus_topic_prefix}.{_activity_type(act)}"
+        try:
+            self._publish(topic, {"activity": act, "activity_id": aid, "ts": ts})
+        except Exception:
+            logger.exception("publishing miloco activity %s failed", aid)
+            return False
+        self._save_state()
+        return True
+
+    # -- polling (catch-up + fallback)
     def poll_once(self) -> int:
         """Fetch activities and publish any not seen before. Returns new count.
 
@@ -495,39 +521,92 @@ class MilocoActivityBridge:
         new tail rather than the whole backlog.
         """
         acts = self.client.activities(since_ms=int(self._last_ts) or None)
-        published = 0
-        for act in acts:
-            aid = _activity_id(act)
-            if aid in self._seen:
-                continue
-            self._seen.add(aid)
-            ts = float(act.get("timestamp") or act.get("time") or 0.0) or time.time() * 1000
-            self._last_ts = max(self._last_ts, ts)
-            topic = f"{self.cfg.bus_topic_prefix}.{_activity_type(act)}"
-            payload = {"activity": act, "activity_id": aid, "ts": ts}
-            try:
-                self._publish(topic, payload)
-                published += 1
-            except Exception:
-                logger.exception("publishing miloco activity %s failed", aid)
+        published = sum(1 for act in acts if self._publish_activity(act))
         if published:
-            self._save_state()
             logger.info("miloco bridge published %d new activity event(s)", published)
         return published
 
+    # -- SSE (real-time)
+    def _stream_once(self) -> bool:
+        """Consume the SSE event stream until it drops. Returns whether it
+        connected at all (False ⇒ SSE unavailable, caller should poll/fallback)."""
+        import httpx
+
+        url = self.client._url("events_stream")
+        headers = self.client._headers()
+        headers["Accept"] = "text/event-stream"
+        # EventSource semantics: also pass the token as a query param, since some
+        # SSE endpoints only accept it that way.
+        params = {"token": self.cfg.api_key} if self.cfg.api_key else None
+        # No read timeout: the stream is long-lived (heartbeats keep it warm).
+        timeout = httpx.Timeout(self.cfg.timeout, read=None)
+        try:
+            with httpx.stream("GET", url, params=params, headers=headers, timeout=timeout) as r:
+                if r.status_code >= 400:
+                    logger.debug("miloco SSE %s -> HTTP %s", url, r.status_code)
+                    return False
+                logger.info("miloco SSE connected: %s", url)
+                event_name: str | None = None
+                data_lines: list[str] = []
+                for line in r.iter_lines():
+                    if self._stop.is_set():
+                        return True
+                    line = (line or "").rstrip("\r")
+                    if line == "":                      # blank line dispatches the event
+                        if data_lines:
+                            self._handle_sse_event(event_name, "\n".join(data_lines))
+                        event_name, data_lines = None, []
+                    elif line.startswith(":"):           # comment / heartbeat ping
+                        continue
+                    elif line.startswith("event:"):
+                        event_name = line[6:].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[5:].lstrip(" "))
+                return True
+        except Exception as e:
+            logger.debug("miloco SSE connection error: %s", e)
+            return False
+
+    def _handle_sse_event(self, event_name: str | None, data_str: str) -> None:
+        if event_name not in (None, "new_event", "message", "event"):
+            return  # ignore non-event frames (e.g. keep-alive markers)
+        try:
+            data = json.loads(data_str)
+        except (json.JSONDecodeError, TypeError):
+            return
+        # The frame may be the event record itself, or wrap it under a key.
+        act = data
+        if isinstance(data, dict):
+            for key in ("event", "activity", "data"):
+                if isinstance(data.get(key), dict):
+                    act = data[key]
+                    break
+        self._publish_activity(act)
+
     def run_forever(self) -> None:
+        mode = "SSE+poll" if self.cfg.use_sse else "poll"
         logger.info(
-            "miloco activity bridge polling %s every %.1fs (topic prefix %s.*)",
-            self.cfg.base_url, self.cfg.poll_interval, self.cfg.bus_topic_prefix,
+            "miloco activity bridge (%s) on %s (topic prefix %s.*, retry %.1fs)",
+            mode, self.cfg.base_url, self.cfg.bus_topic_prefix, self.cfg.poll_interval,
         )
         while not self._stop.is_set():
             try:
+                # Backfill any gap (idempotent via since + de-dup) before/instead
+                # of streaming, so a reconnect never drops events.
                 self.poll_once()
             except MilocoUnavailable:
                 raise
             except Exception:
                 logger.exception("miloco bridge poll error (continuing)")
-            self._stop.wait(self.cfg.poll_interval)
+            if self._stop.is_set():
+                break
+            if self.cfg.use_sse:
+                # Stream live until it drops; on drop, loop back to catch-up poll.
+                connected = self._stream_once()
+                if not connected:
+                    self._stop.wait(self.cfg.poll_interval)  # SSE down → poll cadence
+            else:
+                self._stop.wait(self.cfg.poll_interval)
 
     def start(self) -> "MilocoActivityBridge":
         """Start polling in a daemon thread (non-blocking)."""

@@ -106,6 +106,26 @@ def test_bridge_dedup_and_publish():
         assert bridge2.poll_once() == 0
 
 
+def test_sse_event_handling_and_dedup():
+    with tempfile.TemporaryDirectory() as d:
+        s = _settings(Path(d))
+        published = []
+        bridge = ml.MilocoActivityBridge(s, lambda t, p: published.append((t, p)))
+        # A bare event record frame.
+        bridge._handle_sse_event("new_event", json.dumps(
+            {"id": "e1", "type": "person.arrived", "timestamp": 1000}))
+        # A wrapped frame ({"event": {...}}).
+        bridge._handle_sse_event("new_event", json.dumps(
+            {"event": {"id": "e2", "type": "hazard.smoke", "timestamp": 2000}}))
+        # Duplicate id → ignored.
+        bridge._handle_sse_event("new_event", json.dumps({"id": "e1", "type": "x"}))
+        # Non-event frame → ignored.
+        bridge._handle_sse_event("ping", "{}")
+        topics = [t for t, _ in published]
+        assert topics == ["miloco.activity.person_arrived", "miloco.activity.hazard_smoke"]
+        assert "events_stream" in ml.DEFAULT_ENDPOINTS
+
+
 def test_snapshot_and_context_loader():
     from ssr.context_pool.loaders import load_miloco_context
 
