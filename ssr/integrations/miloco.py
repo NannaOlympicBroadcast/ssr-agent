@@ -400,8 +400,9 @@ class MilocoClient:
     def scope_cameras(self) -> list[dict]:
         return self._as_list(self._request("GET", "scope_cameras"))
 
-    def send_notify(self, notify: dict) -> dict | None:
-        """Send a proactive notification (TTS / IM / Mi push) via Miloco."""
+    def send_notify(self, notify: str) -> dict | None:
+        """Send a proactive notification via Miloco. ``notify`` is the text body
+        (Miloco's ``SendNotifyRequest.notify`` is a non-empty string)."""
         return self._request("POST", "send_notify", json_body={"notify": notify})
 
     def refresh(self) -> dict | None:

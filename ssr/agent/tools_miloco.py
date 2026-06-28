@@ -51,13 +51,43 @@ def miloco_devices(settings: Settings) -> str:
     return _dump(client.devices(), "未发现设备（账号未绑定或 Miloco 未同步）。")
 
 
+def _normalize_control(action: dict) -> dict:
+    """Coerce a control payload into Miloco's ``DeviceControlRequest`` shape.
+
+    Miloco expects ``{"type": "set_property"|"set_properties"|"call_action",
+    "iid": "prop.{siid}.{piid}"|"action.{siid}.{aiid}", "value"/"properties"/
+    "params": …}``. To be forgiving, accept these shorthands and normalise:
+
+    * ``{"siid": 2, "piid": 1, "value": true}``        → set_property prop.2.1
+    * ``{"iid": "prop.2.1", "value": true}``           → set_property (as-is iid)
+    * ``{"siid": 2, "aiid": 1, "params": [..]}``        → call_action action.2.1
+    * anything already carrying ``type``                → passed through unchanged
+    """
+    if not isinstance(action, dict) or action.get("type"):
+        return action
+    if "siid" in action and "piid" in action:
+        return {"type": "set_property", "iid": f"prop.{action['siid']}.{action['piid']}",
+                "value": action.get("value")}
+    if "siid" in action and "aiid" in action:
+        return {"type": "call_action", "iid": f"action.{action['siid']}.{action['aiid']}",
+                "params": action.get("params", [])}
+    if "iid" in action and "value" in action:
+        return {"type": "set_property", "iid": action["iid"], "value": action["value"]}
+    return action
+
+
 def miloco_device_control(settings: Settings, did: str, action_json: str) -> str:
     """Control a Mi Home device via Miloco.
 
     Args:
         did: The device id (``did``) from ``miloco_devices``.
-        action_json: JSON body for the control call, e.g.
-            ``{"siid": 2, "piid": 1, "value": true}`` (per the device spec).
+        action_json: JSON control body. Use Miloco's ``DeviceControlRequest`` shape:
+            set a property — ``{"type":"set_property","iid":"prop.2.1","value":true}``
+            (``iid`` is ``prop.{siid}.{piid}``; get siid/piid from
+            ``miloco_device_spec``); set many —
+            ``{"type":"set_properties","properties":[{"iid":"prop.2.1","value":true}]}``;
+            run an action — ``{"type":"call_action","iid":"action.2.1","params":[]}``.
+            A shorthand ``{"siid":2,"piid":1,"value":true}`` is also accepted.
     """
     client, msg = _client_or_msg(settings)
     if client is None:
@@ -66,9 +96,16 @@ def miloco_device_control(settings: Settings, did: str, action_json: str) -> str
         action = json.loads(action_json) if action_json else {}
     except json.JSONDecodeError as e:
         return f"action_json 不是合法 JSON：{e}"
-    result = client.control_device(did, action)
+    body = _normalize_control(action)
+    if not body.get("type"):
+        return ("控制参数缺少 type。请用 DeviceControlRequest 形式，例如 "
+                '{"type":"set_property","iid":"prop.2.1","value":true}；'
+                "iid 为 prop.{siid}.{piid}，可先用 miloco_device_spec 查 siid/piid。")
+    result = client.control_device(did, body)
     if result is None:
-        return f"控制设备 {did} 失败（Miloco 未响应或参数无效）。"
+        return (f"控制设备 {did} 失败（Miloco 未响应、鉴权失败或参数无效）。"
+                f"已下发 body：{json.dumps(body, ensure_ascii=False)}。"
+                "用 miloco_device_spec 确认 iid，用 miloco_status 确认连通/鉴权。")
     return f"已下发控制到 {did}：{json.dumps(result, ensure_ascii=False)}"
 
 
@@ -173,23 +210,19 @@ def miloco_scope(settings: Settings) -> str:
             + "\n摄像头(cameras):\n" + json.dumps(cams, ensure_ascii=False, indent=2))
 
 
-def miloco_notify(settings: Settings, notify_json: str) -> str:
+def miloco_notify(settings: Settings, message: str) -> str:
     """Send a proactive home notification via Miloco (speaker TTS / IM / Mi push).
 
     Args:
-        notify_json: JSON body for Miloco's ``notify`` payload, e.g.
-            ``{"type":"tts","text":"该吃药了"}`` (shape follows Miloco's
-            SendNotifyRequest; use ``miloco-cli`` docs / the miloco-notify skill).
+        message: The notification text to deliver (Miloco decides the channel).
     """
     client, msg = _client_or_msg(settings)
     if client is None:
         return msg
-    try:
-        notify = json.loads(notify_json) if notify_json else {}
-    except json.JSONDecodeError as e:
-        return f"notify_json 不是合法 JSON：{e}"
-    res = client.send_notify(notify)
-    return "通知已发送。" if res is not None else "发送通知失败（Miloco 未响应或参数无效）。"
+    if not (message or "").strip():
+        return "通知内容为空。"
+    res = client.send_notify(message)
+    return "通知已发送。" if res is not None else "发送通知失败（Miloco 未响应或鉴权失败）。"
 
 
 def miloco_refresh(settings: Settings) -> str:

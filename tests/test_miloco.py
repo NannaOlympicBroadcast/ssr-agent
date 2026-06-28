@@ -156,6 +156,22 @@ def test_miloco_skills_bundled():
         assert name in bundled, name
 
 
+def test_control_payload_normalization():
+    from ssr.agent.tools_miloco import _normalize_control
+
+    # Shorthand siid/piid → set_property with prop.{siid}.{piid} iid.
+    assert _normalize_control({"siid": 2, "piid": 1, "value": True}) == {
+        "type": "set_property", "iid": "prop.2.1", "value": True}
+    # Shorthand siid/aiid → call_action.
+    assert _normalize_control({"siid": 5, "aiid": 1, "params": ["hi"]}) == {
+        "type": "call_action", "iid": "action.5.1", "params": ["hi"]}
+    # iid+value shorthand.
+    assert _normalize_control({"iid": "prop.2.1", "value": 3})["type"] == "set_property"
+    # Already a full request → unchanged.
+    full = {"type": "set_properties", "properties": [{"iid": "prop.2.1", "value": 1}]}
+    assert _normalize_control(full) == full
+
+
 def test_new_endpoints_present():
     eps = ml.DEFAULT_ENDPOINTS
     for name in ("device_status", "device_spec", "scene_trigger", "tasks",

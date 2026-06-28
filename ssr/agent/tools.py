@@ -311,7 +311,10 @@ class ToolKit:
 
         Args:
             did: Device id (``did``) from ``miloco_devices``.
-            action_json: JSON control body, e.g. ``{"siid":2,"piid":1,"value":true}``.
+            action_json: Miloco DeviceControlRequest JSON, e.g.
+                ``{"type":"set_property","iid":"prop.2.1","value":true}`` (iid is
+                ``prop.{siid}.{piid}`` — get siid/piid from ``miloco_device_spec``);
+                or ``{"type":"call_action","iid":"action.2.1","params":[]}``.
         """
         from . import tools_miloco
         return tools_miloco.miloco_device_control(self.settings, did, action_json)
@@ -368,14 +371,14 @@ class ToolKit:
         from . import tools_miloco
         return tools_miloco.miloco_scope(self.settings)
 
-    def miloco_notify(self, notify_json: str) -> str:
+    def miloco_notify(self, message: str) -> str:
         """Send a proactive home notification via Miloco (speaker TTS / IM / Mi push).
 
         Args:
-            notify_json: JSON ``notify`` payload, e.g. ``{"type":"tts","text":"该吃药了"}``.
+            message: The notification text to deliver.
         """
         from . import tools_miloco
-        return tools_miloco.miloco_notify(self.settings, notify_json)
+        return tools_miloco.miloco_notify(self.settings, message)
 
     def miloco_refresh(self) -> str:
         """Refresh Miloco's device/scene/user caches from the Mi cloud."""
