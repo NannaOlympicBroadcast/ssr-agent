@@ -111,22 +111,62 @@ def _bridge_state_path(settings: Settings) -> Path:
     return data_dir(settings) / "bridge-state.json"
 
 
+def _token_from_miloco_config() -> str:
+    """Read Miloco's auto-generated ``server.token`` from a shared config file.
+
+    Miloco generates a Bearer token on first boot and writes it to
+    ``$MILOCO_HOME/config.json`` (nested ``server.token``). When that file is
+    mounted into the SSR container (compose shares the ``miloco-data`` volume),
+    point ``MILOCO_CONFIG_FILE`` at it and SSR picks up the token automatically —
+    no manual copy needed. ``MILOCO_HOME`` is honoured as a fallback location.
+    """
+    candidates = []
+    if os.environ.get("MILOCO_CONFIG_FILE"):
+        candidates.append(Path(os.environ["MILOCO_CONFIG_FILE"]))
+    if os.environ.get("MILOCO_HOME"):
+        candidates.append(Path(os.environ["MILOCO_HOME"]) / "config.json")
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        server = data.get("server") if isinstance(data, dict) else None
+        if isinstance(server, dict) and server.get("token"):
+            return str(server["token"])
+    return ""
+
+
 def load_config(settings: Settings) -> MilocoConfig:
+    """Load the Miloco config, with environment variables taking precedence.
+
+    Precedence (high → low): ``MILOCO_*`` env vars > ``~/.ssr/miloco.json`` >
+    code defaults. Env wins so a containerized deployment can point SSR at the
+    ``miloco`` service (``MILOCO_BASE_URL``) and supply the Bearer token
+    (``MILOCO_API_KEY`` / ``MILOCO_TOKEN``, or auto-discovered from a shared
+    Miloco ``config.json``) without editing the file inside the volume.
+    """
     p = config_path(settings)
-    if not p.exists():
-        # Environment overrides let a Docker deployment configure Miloco without
-        # writing a file into the volume.
-        env_url = os.environ.get("MILOCO_BASE_URL")
-        cfg = MilocoConfig()
-        if env_url:
-            cfg.base_url = env_url
-        if os.environ.get("MILOCO_API_KEY"):
-            cfg.api_key = os.environ["MILOCO_API_KEY"]
-        return cfg
-    try:
-        return MilocoConfig.from_dict(json.loads(p.read_text("utf-8")))
-    except (OSError, json.JSONDecodeError):
-        return MilocoConfig()
+    cfg = MilocoConfig()
+    if p.exists():
+        try:
+            cfg = MilocoConfig.from_dict(json.loads(p.read_text("utf-8")))
+        except (OSError, json.JSONDecodeError):
+            cfg = MilocoConfig()
+
+    # Environment overrides the file (authoritative for Docker/Compose deploys).
+    env_url = os.environ.get("MILOCO_BASE_URL")
+    if env_url:
+        cfg.base_url = env_url
+    env_key = os.environ.get("MILOCO_API_KEY") or os.environ.get("MILOCO_TOKEN")
+    if env_key:
+        cfg.api_key = env_key
+
+    # Last resort: read Miloco's auto-generated service token from a shared config.
+    if not cfg.api_key:
+        tok = _token_from_miloco_config()
+        if tok:
+            cfg.api_key = tok
+    return cfg
 
 
 def save_config(settings: Settings, cfg: MilocoConfig) -> Path:
@@ -270,6 +310,32 @@ class MilocoClient:
     def health(self) -> bool:
         """True if the Miloco service answers its ``/health`` probe."""
         return bool(self._request("GET", "health", raw=True))
+
+    def authed_ok(self) -> bool | None:
+        """Whether an *authenticated* endpoint accepts our token.
+
+        Returns True (token accepted / auth disabled), False (401/403 — wrong or
+        missing Bearer token), or None (Miloco unreachable). Used to tell a
+        connectivity failure apart from an auth failure when syncing.
+        """
+        import httpx
+
+        try:
+            r = httpx.get(self._url("bind_status"), headers=self._headers(), timeout=self.cfg.timeout)
+        except Exception:
+            return None
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code < 400
+
+    def probe(self) -> dict:
+        """A one-shot diagnostic snapshot for ``ssr miloco status``."""
+        return {
+            "base_url": self.cfg.base_url,
+            "has_token": bool(self.cfg.api_key),
+            "health": self.health(),
+            "authed": self.authed_ok(),
+        }
 
     def bind_status(self) -> dict | None:
         """Mi-account bind status (``data`` of ``/api/miot/status``)."""
@@ -500,15 +566,27 @@ def sync_snapshot(settings: Settings, cfg: MilocoConfig | None = None) -> dict:
     except MilocoUnavailable as e:
         snap["error"] = str(e)
         return snap
+
+    # Diagnose reachability/auth up front so the error is actionable.
+    if not client.health():
+        snap["error"] = (
+            f"无法连接 Miloco（{cfg.base_url}）。请确认 Miloco 已启动，且该地址从当前进程可达"
+            "（容器内应指向服务名，如 http://miloco:1810，可用 MILOCO_BASE_URL 覆盖）。"
+        )
+        return snap
+    if client.authed_ok() is False:
+        snap["error"] = (
+            f"Miloco 已连接（{cfg.base_url}）但鉴权失败（401）。Miloco 首次启动会生成 "
+            "server.token，请把它配置给 SSR：设置 MILOCO_API_KEY/MILOCO_TOKEN，或让 "
+            "MILOCO_CONFIG_FILE 指向 Miloco 的 config.json 以自动读取。"
+        )
+        return snap
+
     snap["homes"] = client.homes()
     snap["devices"] = client.devices()
     snap["members"] = client.members()
     snap["automations"] = client.automations()
     snap["activities"] = client.activities(limit=cfg.activity_limit)
-    if not client.health() and not any(
-        snap.get(k) for k in ("homes", "devices", "members", "automations", "activities")
-    ):
-        snap["error"] = f"Miloco 未响应（{cfg.base_url}）。请确认 Miloco 服务已启动。"
     try:
         snapshot_path(settings).write_text(
             json.dumps(snap, ensure_ascii=False, indent=2), "utf-8"

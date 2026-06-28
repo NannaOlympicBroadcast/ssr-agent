@@ -29,6 +29,28 @@ def test_config_roundtrip_and_endpoint_defaults():
         assert again.endpoints["activities"] == ml.DEFAULT_ENDPOINTS["activities"]
 
 
+def test_env_overrides_and_token_discovery(monkeypatch):
+    with tempfile.TemporaryDirectory() as d:
+        s = _settings(Path(d))
+        # A config file says one base_url...
+        ml.save_config(s, ml.MilocoConfig(base_url="http://file:1810"))
+        # ...but env is authoritative (containerized deploy points at the service).
+        monkeypatch.setenv("MILOCO_BASE_URL", "http://miloco:1810")
+        monkeypatch.setenv("MILOCO_TOKEN", "tok-123")
+        cfg = ml.load_config(s)
+        assert cfg.base_url == "http://miloco:1810"
+        assert cfg.api_key == "tok-123"
+
+        # Token auto-discovery from a shared Miloco config.json (server.token).
+        monkeypatch.delenv("MILOCO_TOKEN", raising=False)
+        monkeypatch.delenv("MILOCO_API_KEY", raising=False)
+        mlc_cfg = Path(d) / "miloco-config.json"
+        mlc_cfg.write_text(json.dumps({"server": {"token": "auto-tok"}}), "utf-8")
+        monkeypatch.setenv("MILOCO_CONFIG_FILE", str(mlc_cfg))
+        cfg2 = ml.load_config(s)
+        assert cfg2.api_key == "auto-tok"
+
+
 def test_normal_response_envelope_unwrapping():
     f = ml.MilocoClient._as_list
     assert f({"code": 0, "data": {"events": [{"id": 1}]}}) == [{"id": 1}]

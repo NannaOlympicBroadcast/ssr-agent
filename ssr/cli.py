@@ -415,11 +415,21 @@ def cmd_miloco(args, settings: Settings, console: Console) -> int:
         except ml.MilocoUnavailable as e:
             console.print(f"[red]{e}[/red]")
             return 1
-        ok = client.health()
-        console.print(f"Miloco {client.cfg.base_url}: " + ("[green]在线[/green]" if ok else "[red]未响应[/red]"))
-        if ok:
-            console.print(f"账号绑定：{client.bind_status()}")
-        return 0 if ok else 1
+        p = client.probe()
+        console.print(f"地址 base_url：{p['base_url']}  token：{'已配置' if p['has_token'] else '未配置'}")
+        console.print("连通性 /health：" + ("[green]在线[/green]" if p["health"] else "[red]未响应[/red]"))
+        if not p["health"]:
+            console.print("[yellow]提示：容器内 base_url 应指向服务名（如 http://miloco:1810），"
+                          "可用环境变量 MILOCO_BASE_URL 覆盖。[/yellow]")
+            return 1
+        if p["authed"] is False:
+            console.print("[red]鉴权失败（401）[/red]：Miloco 的 server.token 未提供给 SSR。")
+            console.print("[yellow]从 Miloco 读取 token： docker compose exec miloco cat /root/.miloco/config.json"
+                          "  →  server.token，然后设 MILOCO_API_KEY，或让 MILOCO_CONFIG_FILE 指向该文件自动读取。[/yellow]")
+            return 1
+        console.print("鉴权：[green]通过[/green]")
+        console.print(f"账号绑定：{client.bind_status()}")
+        return 0
 
     if action == "sync":
         snap = ml.sync_snapshot(settings)
