@@ -163,6 +163,17 @@ class ArmTools:
         agent = getattr(self.toolkit, "agent_instance", None)
         if agent is None or not hasattr(agent, "create_bus_handler"):
             return "ERROR: arm bus not available in this context"
+        # Race guard: a fast (or no-op) step can publish its completion before this
+        # handler is registered. The bus has no replay, so that wake would be lost
+        # and the session would hang until the outer timeout. The controller caches
+        # every completion, so if the step is already done, don't suspend — tell the
+        # agent to judge it right now in this same turn.
+        ctrl = self._controller()
+        if ctrl is not None and ctrl.completion_ready():
+            return ("The robot step already completed before the session could "
+                    "suspend. Do NOT end your turn — call arm_check_result now to "
+                    "judge it, then invoke the next step (and arm_await_completion "
+                    "again) or arm_report_done if the instruction is finished.")
         prompt = handler_prompt or (
             "A robot step just completed. Call arm_check_result (and arm_get_camera "
             "if useful) to judge it against the user's instruction. If it failed, "
@@ -175,6 +186,15 @@ class ArmTools:
             P.PATTERN_COMPLETED, prompt, once=True, inherit_session=True,
             description="arm step checker",
         )
+        # Re-check after registering: if the completion landed in the tiny window
+        # between the guard above and the subscribe, the handler missed it too —
+        # drop it and have the agent check now rather than wait forever.
+        if ctrl is not None and ctrl.completion_ready():
+            agent.remove_bus_handler(hid)
+            return ("The robot step already completed before the session could "
+                    "suspend. Do NOT end your turn — call arm_check_result now to "
+                    "judge it, then invoke the next step (and arm_await_completion "
+                    "again) or arm_report_done if the instruction is finished.")
         return (f"Registered completion handler {hid}. END YOUR TURN now to suspend "
                 "the session; the robot's completion event will wake the checker.")
 

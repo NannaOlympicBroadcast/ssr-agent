@@ -28,6 +28,9 @@ class ArmController:
         self._last_completion: dict | None = None
         self._last_state: dict | None = None
         self._episode = 0
+        # seq_id of the most recently dispatched action, so we can tell whether a
+        # cached completion belongs to the step we're currently waiting on.
+        self._pending_seq: str | None = None
         self.bus.subscribe(P.TOPIC_CAPS, self._on_caps)
         self.bus.subscribe(P.TOPIC_GRASP_COMPLETED, self._on_completion)
         self.bus.subscribe(P.TOPIC_ACTION_COMPLETED, self._on_completion)
@@ -71,6 +74,10 @@ class ArmController:
             req.seq_id = uuid.uuid4().hex[:10]
         with self._lock:
             req.episode = self._episode or 1
+            # Clear any prior completion and remember this seq, so completion_ready()
+            # only reports the result of *this* step, not a stale earlier one.
+            self._pending_seq = req.seq_id
+            self._last_completion = None
         self.bus.publish(P.TOPIC_ACTION_EXECUTE, req.to_payload(), source=self.source)
         return req.seq_id
 
@@ -90,6 +97,17 @@ class ArmController:
     def last_completion(self) -> dict | None:
         with self._lock:
             return dict(self._last_completion) if self._last_completion else None
+
+    def completion_ready(self) -> bool:
+        """Whether the completion for the most recently dispatched step already
+        arrived. The env publishes its completion as soon as the step settles —
+        which, for a fast or no-op skill, can happen *before* the agent gets to
+        register its completion handler. Since the bus has no replay, that wake
+        would be lost forever; callers use this to detect the case and check the
+        result directly instead of suspending on an event that already fired."""
+        with self._lock:
+            c = self._last_completion
+            return bool(c and self._pending_seq and c.get("seq_id") == self._pending_seq)
 
     def last_state(self) -> dict | None:
         with self._lock:

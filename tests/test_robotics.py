@@ -113,3 +113,60 @@ def test_arm_invoke_non_raw_skill_keeps_args_unchanged():
     assert len(seen) == 1
     assert seen[0].payload["args"] == {"object": "apple"}
     assert seen[0].payload["actions"] == []
+
+
+def test_completion_ready_tracks_pending_seq():
+    bus = MessageBus(name="t", source="t")
+    ctrl = ArmController(bus)
+    seq = ctrl.execute(P.ArmActionRequest(seq_id="", episode=0, command="pick",
+                                          args={"object": "apple"}))
+    assert ctrl.completion_ready() is False
+    # A completion for a different step must not count.
+    bus.publish(P.TOPIC_ACTION_COMPLETED, {"seq_id": "other", "ok": True})
+    assert ctrl.completion_ready() is False
+    # The matching completion does.
+    bus.publish(P.TOPIC_ACTION_COMPLETED, {"seq_id": seq, "ok": True})
+    assert ctrl.completion_ready() is True
+    # Dispatching the next step clears the previous result.
+    ctrl.execute(P.ArmActionRequest(seq_id="", episode=0, command="pick"))
+    assert ctrl.completion_ready() is False
+
+
+def _fake_agent(bus, handlers):
+    return SimpleNamespace(
+        bus=bus, agent_id="t",
+        create_bus_handler=lambda *a, **k: handlers.append((a, k)) or "h1",
+        remove_bus_handler=lambda hid: handlers.append(("removed", hid)) or True,
+    )
+
+
+def test_await_completion_does_not_suspend_when_step_already_done():
+    # The completion can land before the handler registers (fast/no-op skills);
+    # the bus has no replay, so suspending would hang. arm_await_completion must
+    # detect the already-cached completion and keep the turn going instead.
+    bus = MessageBus(name="t", source="t")
+    handlers = []
+    agent = _fake_agent(bus, handlers)
+    tools = ArmTools(SimpleNamespace(agent_instance=agent))
+
+    tools.arm_invoke("pick", '{"object": "apple"}')
+    ctrl = agent._arm_controller
+    bus.publish(P.TOPIC_ACTION_COMPLETED,
+                {"seq_id": ctrl._pending_seq, "command": "pick", "ok": True})
+
+    msg = tools.arm_await_completion()
+    assert "Do NOT end your turn" in msg
+    assert handlers == []  # no handler registered for an event that already fired
+
+
+def test_await_completion_suspends_when_step_not_yet_done():
+    bus = MessageBus(name="t", source="t")
+    handlers = []
+    agent = _fake_agent(bus, handlers)
+    tools = ArmTools(SimpleNamespace(agent_instance=agent))
+
+    tools.arm_invoke("pick", '{"object": "apple"}')
+    msg = tools.arm_await_completion()  # no completion yet → normal suspend path
+
+    assert "END YOUR TURN" in msg
+    assert len(handlers) == 1 and handlers[0][0][0] == P.PATTERN_COMPLETED

@@ -26,8 +26,16 @@ def run_instruction(settings, instruction: str, bus_url: str | None = None,
                     timeout: float = 180.0, console=None) -> int:
     """Drive the real Isaac bridge from a free-form instruction (needs GEMINI_API_KEY)."""
     from ..agent.core import SSRAgent
+    from ..approval import AutoApprovalHandler
 
     agent = SSRAgent(settings)
+    # `ssr arm do` drives the agent headlessly (agent.run() with no stdin-polling
+    # loop), so the default TUIApprovalHandler would block forever on input() the
+    # moment any command needs approval — in the main turn *and* in every
+    # bus-woken checker turn — stalling the whole instruction. There is no usable
+    # approval UX here (same situation as the xiaomi speaker channel), so
+    # auto-approve every command.
+    agent.toolkit.approval_handler = AutoApprovalHandler()
     url = _bridge_to_bus(agent, bus_url)
     done = {"ok": False, "summary": ""}
 
