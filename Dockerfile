@@ -12,7 +12,7 @@ ENV PYTHONUNBUFFERED=1 \
     SSR_HOME=/data/.ssr
 
 # Optional: set INSTALL_NODE=true to also install Node.js so the bundled
-# chrome-devtools / miot MCP plugins (run via npx) are available in-container.
+# chrome-devtools MCP plugin (run via npx) is available in-container.
 ARG INSTALL_NODE=false
 
 RUN apt-get update \

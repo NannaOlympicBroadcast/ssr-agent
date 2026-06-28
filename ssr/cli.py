@@ -391,6 +391,79 @@ def cmd_gateway(args, settings: Settings, console: Console) -> int:
     return 0
 
 
+def cmd_miloco(args, settings: Settings, console: Console) -> int:
+    """Inspect / sync the Xiaomi Miloco home integration and run the bus bridge."""
+    from .integrations import miloco as ml
+
+    action = args.miloco_action
+
+    if action == "config":
+        cfg = ml.load_config(settings)
+        base = input(f"Miloco 服务地址 base_url [{cfg.base_url}]: ").strip() or cfg.base_url
+        key = input(f"API key (可留空) [{'•' * 6 if cfg.api_key else ''}]: ").strip() or cfg.api_key
+        cfg.base_url = base
+        cfg.api_key = key
+        path = ml.save_config(settings, cfg)
+        console.print(f"[green]✓[/green] 已保存 {path}")
+        if not ml.is_native_supported() and not ml.running_in_docker():
+            console.print(f"[yellow]{ml.WINDOWS_DOCKER_HINT}[/yellow]")
+        return 0
+
+    if action == "status":
+        try:
+            client = ml.MilocoClient(settings=settings)
+        except ml.MilocoUnavailable as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+        ok = client.health()
+        console.print(f"Miloco {client.cfg.base_url}: " + ("[green]在线[/green]" if ok else "[red]未响应[/red]"))
+        if ok:
+            console.print(f"账号绑定：{client.bind_status()}")
+        return 0 if ok else 1
+
+    if action == "sync":
+        snap = ml.sync_snapshot(settings)
+        if snap.get("error"):
+            console.print(f"[red]{snap['error']}[/red]")
+            return 1
+        counts = {k: len(snap.get(k) or []) for k in ("homes", "devices", "members", "automations", "activities")}
+        console.print(f"[green]✓[/green] 已同步快照 → {ml.snapshot_path(settings)}")
+        console.print(counts)
+        return 0
+
+    if action in ("devices", "family", "activities", "automations"):
+        try:
+            client = ml.MilocoClient(settings=settings)
+        except ml.MilocoUnavailable as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+        data = {
+            "devices": client.devices,
+            "family": client.members,
+            "activities": client.activities,
+            "automations": client.automations,
+        }[action]()
+        import json as _json
+        console.print(_json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+
+    if action == "bridge":
+        bridge = ml.start_bridge_via_busclient(settings)
+        if bridge is None:
+            console.print("[red]Miloco 桥接未启动（未启用 / 平台不支持 / 总线不可达）。[/red]")
+            return 1
+        console.print("[green]Miloco 活动 → 总线 桥接已启动。Ctrl-C 退出。[/green]")
+        import time as _time
+        try:
+            while True:
+                _time.sleep(1)
+        except KeyboardInterrupt:
+            bridge.stop()
+        return 0
+
+    return 0
+
+
 def cmd_acp(settings: Settings) -> int:
     from .integrations.acp import run_acp
 
@@ -1182,6 +1255,18 @@ def build_parser() -> argparse.ArgumentParser:
     gwrun = gwsub.add_parser("run", help="run a gateway in the foreground (used by the system service)")
     gwrun.add_argument("name")
 
+    # miloco — Xiaomi Mi Home integration (replaces the legacy miot plugin)
+    mlc = sub.add_parser("miloco", help="Xiaomi Miloco home integration: status / sync / bridge")
+    mlcsub = mlc.add_subparsers(dest="miloco_action", required=True)
+    mlcsub.add_parser("config", help="set the Miloco service base_url / API key")
+    mlcsub.add_parser("status", help="check whether Miloco is reachable and the Mi account is bound")
+    mlcsub.add_parser("sync", help="refresh the cached home snapshot (devices/family/events/automations)")
+    mlcsub.add_parser("devices", help="list Mi Home devices")
+    mlcsub.add_parser("family", help="list recognised family members / persons")
+    mlcsub.add_parser("activities", help="list recent home events/activities")
+    mlcsub.add_parser("automations", help="list automation rules")
+    mlcsub.add_parser("bridge", help="run the activity → bus bridge in the foreground")
+
     # srdb — connect to a running agent's debug server
     srdb = sub.add_parser("srdb", help="debug a running SSR agent via its tcp:// srdb link")
     srdbsub = srdb.add_subparsers(dest="srdb_action", required=True)
@@ -1279,6 +1364,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_srdb(args, settings, console)
     if args.command == "gateway":
         return cmd_gateway(args, settings, console)
+    if args.command == "miloco":
+        return cmd_miloco(args, settings, console)
 
     return repl(settings, console, turbo_mode=bool(getattr(args, "turbo_mode", False)))
 

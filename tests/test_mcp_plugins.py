@@ -20,14 +20,16 @@ def test_install_builtin_plugins():
         settings.ensure_dirs()
         
         installed = install_builtin_plugins(settings.plugins_dir)
-        assert "miot" in installed
-        
+        # The legacy `miot` plugin has been removed (replaced by the native
+        # Miloco integration); `chrome-devtools` remains a bundled plugin.
+        assert "miot" not in installed
+        assert "chrome-devtools" in installed
+
         # Check that files were copied
-        plugin_dir = settings.plugins_dir / "miot"
+        plugin_dir = settings.plugins_dir / "chrome-devtools"
         assert plugin_dir.exists()
         assert (plugin_dir / ".claude-plugin" / "plugin.json").exists()
         assert (plugin_dir / ".mcp.json").exists()
-        assert (plugin_dir / "start_mcp.py").exists()
 
 
 def test_resolve_dirnames():

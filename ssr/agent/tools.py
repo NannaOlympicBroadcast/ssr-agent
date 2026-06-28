@@ -295,6 +295,51 @@ class ToolKit:
         from .tools_push import push_notification_impl
         return push_notification_impl(self.settings, channel, target, message)
 
+    # ----------------------------------------------------------- miloco (home)
+    def miloco_status(self) -> str:
+        """Check the Xiaomi Miloco home service: reachable? Mi account bound?"""
+        from . import tools_miloco
+        return tools_miloco.miloco_status(self.settings)
+
+    def miloco_devices(self) -> str:
+        """List Mi Home devices known to Miloco (id/did, name, room, online)."""
+        from . import tools_miloco
+        return tools_miloco.miloco_devices(self.settings)
+
+    def miloco_device_control(self, did: str, action_json: str) -> str:
+        """Control a Mi Home device via Miloco.
+
+        Args:
+            did: Device id (``did``) from ``miloco_devices``.
+            action_json: JSON control body, e.g. ``{"siid":2,"piid":1,"value":true}``.
+        """
+        from . import tools_miloco
+        return tools_miloco.miloco_device_control(self.settings, did, action_json)
+
+    def miloco_family(self) -> str:
+        """List recognised family members / persons in Miloco's identity library."""
+        from . import tools_miloco
+        return tools_miloco.miloco_family(self.settings)
+
+    def miloco_activities(self, limit: int = 20) -> str:
+        """List recent meaningful home events/activities from Miloco (newest first).
+
+        Args:
+            limit: Max number of events to return (1–200).
+        """
+        from . import tools_miloco
+        return tools_miloco.miloco_activities(self.settings, limit)
+
+    def miloco_automations(self) -> str:
+        """List Miloco automation rules (triggers / conditions / actions)."""
+        from . import tools_miloco
+        return tools_miloco.miloco_automations(self.settings)
+
+    def miloco_sync(self) -> str:
+        """Refresh the cached Miloco context snapshot (devices/family/events/rules)."""
+        from . import tools_miloco
+        return tools_miloco.miloco_sync(self.settings)
+
     def update_plan(self, steps: list[str]) -> str:
         """Record the current step-by-step plan for the task.
 
@@ -549,6 +594,13 @@ class ToolKit:
             self.bus_remove_handler,
             self.bus_listeners,
             self.bus_history,
+            self.miloco_status,
+            self.miloco_devices,
+            self.miloco_device_control,
+            self.miloco_family,
+            self.miloco_activities,
+            self.miloco_automations,
+            self.miloco_sync,
             *self.arm_tools().callables(),
         ]
 

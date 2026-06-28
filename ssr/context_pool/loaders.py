@@ -126,6 +126,73 @@ def load_refs(settings: Settings) -> list[ContextItem]:
     return items
 
 
+def _miloco_record_text(kind: str, rec: dict) -> tuple[str, str]:
+    """Return ``(title, text)`` for one Miloco record, robust to schema drift."""
+    name = (
+        rec.get("name") or rec.get("device_name") or rec.get("title")
+        or rec.get("person_name") or rec.get("type") or rec.get("event_type")
+        or rec.get("id") or kind
+    )
+    ident = rec.get("did") or rec.get("id") or rec.get("device_id") or rec.get("rule_id") or ""
+    title = f"miloco {kind}: {name}" + (f" ({ident})" if ident else "")
+    text = f"{name}\n" + json.dumps(rec, ensure_ascii=False)[: _MAX_BYTES // 4]
+    return title, text
+
+
+def load_miloco_context(settings: Settings) -> list[ContextItem]:
+    """Surface the cached Miloco home snapshot as persistent context.
+
+    Devices, family members (persons), recent events/activities and automation
+    rules captured by ``ssr miloco sync`` (``~/.ssr/miloco/snapshot.json``) become
+    retrievable REFS items, so the agent can reason about the user's actual home
+    without a live call. No network here — purely the on-disk snapshot, so the
+    pool builds the same offline.
+    """
+    from ..integrations import miloco as ml
+
+    items: list[ContextItem] = []
+    snap = ml.load_snapshot(settings)
+    if not snap:
+        return items
+    source = str(ml.snapshot_path(settings))
+    synced = snap.get("synced_at")
+
+    # An overview item so a broad query ("what's in my home?") retrieves a summary.
+    counts = {k: len(snap.get(k) or []) for k in ("homes", "devices", "members", "automations", "activities")}
+    items.append(
+        ContextItem(
+            category=ContextCategory.REFS,
+            title="miloco: 米家智能家居快照 (Mi Home snapshot)",
+            text=(
+                "Xiaomi Miloco 家居上下文快照。"
+                f"统计：{json.dumps(counts, ensure_ascii=False)}。"
+                f"数据源：Miloco 本地服务 {snap.get('base_url', '')}，同步时间戳 {synced}。\n"
+                "包含设备(devices)、家庭成员(members)、事件(activities)、自动化规则(automations)。"
+            ),
+            source=source,
+            metadata={"kind": "miloco", "part": "overview", "counts": counts},
+        )
+    )
+
+    # Per-record items, bounded so a large home doesn't flood the index.
+    limits = {"homes": 20, "devices": 100, "members": 50, "automations": 100, "activities": 50}
+    for kind, cap in limits.items():
+        for rec in (snap.get(kind) or [])[:cap]:
+            if not isinstance(rec, dict):
+                continue
+            title, text = _miloco_record_text(kind.rstrip("s"), rec)
+            items.append(
+                ContextItem(
+                    category=ContextCategory.REFS,
+                    title=title,
+                    text=text,
+                    source=source,
+                    metadata={"kind": "miloco", "part": kind},
+                )
+            )
+    return items
+
+
 def load_skills(settings: Settings) -> list[ContextItem]:
     """Discover skills across all configured skill directories."""
     items: list[ContextItem] = []
@@ -246,4 +313,5 @@ def build_pool(settings: Settings, tool_specs: list[dict] | None = None) -> Cont
     pool.extend(load_plugins(settings))
     pool.extend(load_memory(settings))
     pool.extend(load_refs(settings))
+    pool.extend(load_miloco_context(settings))
     return pool

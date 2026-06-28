@@ -35,10 +35,15 @@ any namespace are resolved on demand, so a plugin's `.mcp.json` can reference
 Wraps [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)
 for browser automation, debugging and performance analysis. No credentials.
 
-### `miot` (shares the `xiaomi` namespace)
+### Mi Home control → the native `miloco` integration
 
-The `miot` plugin controls MiOT / Mi Home devices and **shares credentials with
-the `xiaomi` channel**: both read `~/.ssr/xiaomi.json` (MiService convention —
-`MI_USER` / `MI_PASS` / `MI_DID`). The plugin's own `.claude-plugin/plugin.json`
-and `.mcp.json` are carried with the plugin; this loader injects the shared
-`${xiaomi.*}` credentials into them automatically.
+The bundled `miot` MCP plugin has been **removed**. Mi Home device control,
+family/identity, home events and automations are now provided by the native
+**Miloco** integration (`ssr/integrations/miloco.py`), which talks to a local
+[Xiaomi Miloco](https://github.com/XiaoMi/xiaomi-miloco) service instead of a
+third-party MIoT MCP server. See `ssr miloco --help` and the agent tools
+`miloco_devices` / `miloco_device_control` / `miloco_family` /
+`miloco_activities` / `miloco_automations` / `miloco_sync`.
+
+Miloco runs natively on macOS/Linux only; on Windows run it (and the SSR
+gateway) in Docker — `ssr gateway` defaults to a Docker backend on Windows.
