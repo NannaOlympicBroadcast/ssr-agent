@@ -9,9 +9,12 @@ machine — see ssr/robotics/README.md.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from ssr.bus.core import MessageBus
 from ssr.robotics import protocol as P
 from ssr.robotics.controller import ArmController
+from ssr.robotics.tools import ArmTools
 
 
 def test_action_request_payload_roundtrip():
@@ -72,3 +75,41 @@ def test_request_capabilities_publishes_request():
     ctrl = ArmController(bus)
     ctrl.request_capabilities(wait=0.0)
     assert len(seen) == 1
+
+
+def test_arm_invoke_routes_raw_actions_to_dedicated_field():
+    # arm_invoke('raw', '{"actions": [...]}') must land the waypoints in
+    # ArmActionRequest.actions (what the env reads), not in .args — putting them
+    # in .args silently no-ops the env's "raw" skill (it never calls env.step()).
+    bus = MessageBus(name="t", source="t")
+    seen = []
+    bus.subscribe(P.TOPIC_ACTION_EXECUTE, lambda ev: seen.append(ev))
+    toolkit = SimpleNamespace(agent_instance=SimpleNamespace(bus=bus, agent_id="t"))
+    tools = ArmTools(toolkit)
+
+    tools.arm_invoke(
+        "raw",
+        '{"actions": [[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0], '
+        '[0.1, 0.1, 0.1, 0.0, 1.0, 0.0, 0.0, 1.0]]}',
+    )
+
+    assert len(seen) == 1
+    assert seen[0].payload["actions"] == [
+        [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+        [0.1, 0.1, 0.1, 0.0, 1.0, 0.0, 0.0, 1.0],
+    ]
+    assert seen[0].payload["args"] == {}
+
+
+def test_arm_invoke_non_raw_skill_keeps_args_unchanged():
+    bus = MessageBus(name="t", source="t")
+    seen = []
+    bus.subscribe(P.TOPIC_ACTION_EXECUTE, lambda ev: seen.append(ev))
+    toolkit = SimpleNamespace(agent_instance=SimpleNamespace(bus=bus, agent_id="t"))
+    tools = ArmTools(toolkit)
+
+    tools.arm_invoke("pick", '{"object": "apple"}')
+
+    assert len(seen) == 1
+    assert seen[0].payload["args"] == {"object": "apple"}
+    assert seen[0].payload["actions"] == []

@@ -114,8 +114,13 @@ class ArmTools:
             if names and skill not in names:
                 return (f"ERROR: '{skill}' is not advertised. Available skills: "
                         f"{', '.join(n for n in names if n)}")
+        # The "raw" skill's waypoints are advertised under args["actions"] (see
+        # capabilities()'s skills list) but the env reads them off the request's
+        # dedicated `actions` field, not `args` — route them there or the env sees
+        # an empty action list and silently no-ops without ever moving the arm.
+        actions = args.pop("actions", []) if skill == "raw" else []
         req = P.ArmActionRequest(seq_id="", episode=0, command=skill, args=args,
-                                 label=f"{skill} {args}")
+                                 actions=actions, label=f"{skill} {args}")
         seq = ctrl.execute(req)
         return (f"Invoked '{skill}' seq_id={seq} (episode {ctrl.episode}). "
                 "Now call arm_await_completion and END YOUR TURN to suspend.")
