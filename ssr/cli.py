@@ -436,7 +436,9 @@ def cmd_miloco(args, settings: Settings, console: Console) -> int:
         if snap.get("error"):
             console.print(f"[red]{snap['error']}[/red]")
             return 1
-        counts = {k: len(snap.get(k) or []) for k in ("homes", "devices", "members", "automations", "activities")}
+        keys = ("homes", "devices", "cameras", "members", "automations", "tasks", "activities")
+        counts = {k: len(snap.get(k) or []) for k in keys}
+        counts["home_profile"] = bool(snap.get("home_profile"))
         console.print(f"[green]✓[/green] 已同步快照 → {ml.snapshot_path(settings)}")
         console.print(counts)
         return 0

@@ -158,7 +158,10 @@ def load_miloco_context(settings: Settings) -> list[ContextItem]:
     synced = snap.get("synced_at")
 
     # An overview item so a broad query ("what's in my home?") retrieves a summary.
-    counts = {k: len(snap.get(k) or []) for k in ("homes", "devices", "members", "automations", "activities")}
+    counts = {
+        k: len(snap.get(k) or [])
+        for k in ("homes", "devices", "cameras", "members", "automations", "tasks", "activities")
+    }
     items.append(
         ContextItem(
             category=ContextCategory.REFS,
@@ -167,15 +170,34 @@ def load_miloco_context(settings: Settings) -> list[ContextItem]:
                 "Xiaomi Miloco 家居上下文快照。"
                 f"统计：{json.dumps(counts, ensure_ascii=False)}。"
                 f"数据源：Miloco 本地服务 {snap.get('base_url', '')}，同步时间戳 {synced}。\n"
-                "包含设备(devices)、家庭成员(members)、事件(activities)、自动化规则(automations)。"
+                "包含设备(devices)、摄像头(cameras)、家庭成员(members)、事件(activities)、"
+                "自动化规则(automations)、家庭任务(tasks)、家庭档案(home_profile)。"
             ),
             source=source,
             metadata={"kind": "miloco", "part": "overview", "counts": counts},
         )
     )
 
+    # The rendered home memory (preferences/habits/routines) — its own item so a
+    # query about the family's habits/preferences retrieves it directly.
+    profile = snap.get("home_profile")
+    if profile:
+        profile_text = profile if isinstance(profile, str) else json.dumps(profile, ensure_ascii=False)
+        items.append(
+            ContextItem(
+                category=ContextCategory.REFS,
+                title="miloco: 家庭档案 (home profile — 偏好/习惯/作息)",
+                text="家庭成员的偏好、习惯、作息、家庭规则等长期记忆：\n" + profile_text[:_MAX_BYTES // 2],
+                source=source,
+                metadata={"kind": "miloco", "part": "home_profile"},
+            )
+        )
+
     # Per-record items, bounded so a large home doesn't flood the index.
-    limits = {"homes": 20, "devices": 100, "members": 50, "automations": 100, "activities": 50}
+    limits = {
+        "homes": 20, "devices": 100, "cameras": 30, "members": 50,
+        "automations": 100, "tasks": 100, "activities": 50,
+    }
     for kind, cap in limits.items():
         for rec in (snap.get(kind) or [])[:cap]:
             if not isinstance(rec, dict):

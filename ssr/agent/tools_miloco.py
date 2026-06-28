@@ -96,6 +96,111 @@ def miloco_automations(settings: Settings) -> str:
     return _dump(client.automations(), "暂无自动化规则。")
 
 
+def miloco_device_status(settings: Settings, did: str) -> str:
+    """Read a Mi Home device's current property values (on/off, temp, battery…).
+
+    Args:
+        did: The device id (``did``) from ``miloco_devices``.
+    """
+    client, msg = _client_or_msg(settings)
+    if client is None:
+        return msg
+    data = client.device_status(did)
+    return json.dumps(data, ensure_ascii=False, indent=2) if data is not None else f"读取设备 {did} 状态失败。"
+
+
+def miloco_device_spec(settings: Settings, did: str) -> str:
+    """Get a device's MIoT spec (the siid/piid/aiid map needed for control).
+
+    Args:
+        did: The device id (``did``) from ``miloco_devices``.
+    """
+    client, msg = _client_or_msg(settings)
+    if client is None:
+        return msg
+    data = client.device_spec(did)
+    return json.dumps(data, ensure_ascii=False, indent=2) if data is not None else f"读取设备 {did} spec 失败。"
+
+
+def miloco_trigger_scene(settings: Settings, scene_id: str) -> str:
+    """Trigger a Mi Home manual scene (e.g. 回家/离家/睡眠) by its scene id.
+
+    Args:
+        scene_id: The Mi Home scene id to run.
+    """
+    client, msg = _client_or_msg(settings)
+    if client is None:
+        return msg
+    res = client.trigger_scene(scene_id)
+    return f"已触发场景 {scene_id}：{json.dumps(res, ensure_ascii=False)}" if res is not None else f"触发场景 {scene_id} 失败。"
+
+
+def miloco_cameras(settings: Settings) -> str:
+    """List Mi Home cameras known to Miloco (id, name, online/connected state)."""
+    client, msg = _client_or_msg(settings)
+    if client is None:
+        return msg
+    return _dump(client.cameras(), "未发现摄像头。")
+
+
+def miloco_tasks(settings: Settings) -> str:
+    """List Miloco persistent home tasks (reminders / automations / habit stats)."""
+    client, msg = _client_or_msg(settings)
+    if client is None:
+        return msg
+    return _dump(client.tasks(), "暂无家庭任务。")
+
+
+def miloco_home_profile(settings: Settings) -> str:
+    """Read the home memory/profile — family preferences, habits, routines, rules."""
+    client, msg = _client_or_msg(settings)
+    if client is None:
+        return msg
+    data = client.home_profile()
+    if not data:
+        return "家庭档案为空（尚未积累偏好/习惯记录）。"
+    return data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def miloco_scope(settings: Settings) -> str:
+    """Show Miloco's perception scope — which homes and cameras it perceives."""
+    client, msg = _client_or_msg(settings)
+    if client is None:
+        return msg
+    homes = client.scope_homes()
+    cams = client.scope_cameras()
+    return ("感知范围\n家庭(homes):\n" + json.dumps(homes, ensure_ascii=False, indent=2)
+            + "\n摄像头(cameras):\n" + json.dumps(cams, ensure_ascii=False, indent=2))
+
+
+def miloco_notify(settings: Settings, notify_json: str) -> str:
+    """Send a proactive home notification via Miloco (speaker TTS / IM / Mi push).
+
+    Args:
+        notify_json: JSON body for Miloco's ``notify`` payload, e.g.
+            ``{"type":"tts","text":"该吃药了"}`` (shape follows Miloco's
+            SendNotifyRequest; use ``miloco-cli`` docs / the miloco-notify skill).
+    """
+    client, msg = _client_or_msg(settings)
+    if client is None:
+        return msg
+    try:
+        notify = json.loads(notify_json) if notify_json else {}
+    except json.JSONDecodeError as e:
+        return f"notify_json 不是合法 JSON：{e}"
+    res = client.send_notify(notify)
+    return "通知已发送。" if res is not None else "发送通知失败（Miloco 未响应或参数无效）。"
+
+
+def miloco_refresh(settings: Settings) -> str:
+    """Refresh Miloco's device/scene/user caches from the Mi cloud."""
+    client, msg = _client_or_msg(settings)
+    if client is None:
+        return msg
+    res = client.refresh()
+    return "已刷新 Miloco 设备缓存。" if res is not None else "刷新失败（Miloco 未响应）。"
+
+
 def miloco_sync(settings: Settings) -> str:
     """Refresh the cached Miloco context snapshot (devices/family/events/automations).
 
@@ -105,5 +210,7 @@ def miloco_sync(settings: Settings) -> str:
     snap = ml.sync_snapshot(settings)
     if snap.get("error"):
         return f"同步失败：{snap['error']}"
-    counts = {k: len(snap.get(k) or []) for k in ("homes", "devices", "members", "automations", "activities")}
+    keys = ("homes", "devices", "cameras", "members", "automations", "tasks", "activities")
+    counts = {k: len(snap.get(k) or []) for k in keys}
+    counts["home_profile"] = bool(snap.get("home_profile"))
     return f"已同步 Miloco 上下文快照：{json.dumps(counts, ensure_ascii=False)} → {ml.snapshot_path(settings)}"

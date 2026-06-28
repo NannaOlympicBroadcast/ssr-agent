@@ -57,14 +57,25 @@ DEFAULT_BASE_URL = "http://127.0.0.1:1810"
 DEFAULT_ENDPOINTS: dict[str, str] = {
     "health": "/health",                               # GET, unauthenticated probe
     "bind_status": "/api/miot/status",                 # GET, Mi account bind state
+    "user_info": "/api/miot/user_info",                # GET, Mi account user info
     "devices": "/api/miot/device_list",                # GET, Mi Home devices
     "device_control": "/api/miot/devices/{did}/control",  # POST, control a device
     "device_status": "/api/miot/devices/{did}/status",    # GET, current properties
+    "device_spec": "/api/miot/devices/{did}/spec",        # GET, device MIoT spec
+    "device_history": "/api/miot/device_history",         # GET, recent per-device history
     "homes": "/api/miot/home",                         # GET, homes/rooms
-    "scenes": "/api/miot/scenes",                       # GET, Mi Home scenes
+    "cameras": "/api/miot/camera_list",                # GET, Mi Home cameras
+    "scene_trigger": "/api/miot/scenes/{scene_id}/trigger",  # POST, run a manual scene
     "members": "/api/identity/persons",                # GET, recognised family persons
     "activities": "/api/events",                       # GET, meaningful home events
     "automations": "/api/rules",                       # GET, Miloco automation rules
+    "tasks": "/api/tasks",                             # GET, persistent home tasks
+    "home_profile": "/api/home-profile/rendered",      # GET, rendered home memory/profile
+    "home_profile_entries": "/api/home-profile/entries",  # GET, home-profile entries
+    "scope_homes": "/api/miot/scope/homes",            # GET, perception scope: homes
+    "scope_cameras": "/api/miot/scope/cameras",        # GET, perception scope: cameras
+    "send_notify": "/api/miot/send_notify",            # POST, proactive notification
+    "refresh_all": "/api/miot/refresh_miot_all_info",  # POST, refresh device caches
 }
 
 
@@ -348,14 +359,54 @@ class MilocoClient:
     def homes(self) -> list[dict]:
         return self._as_list(self._request("GET", "homes"))
 
-    def scenes(self) -> list[dict]:
-        return self._as_list(self._request("GET", "scenes"))
+    def cameras(self) -> list[dict]:
+        return self._as_list(self._request("GET", "cameras"))
 
     def members(self) -> list[dict]:
         return self._as_list(self._request("GET", "members"))
 
     def automations(self) -> list[dict]:
         return self._as_list(self._request("GET", "automations"))
+
+    def tasks(self) -> list[dict]:
+        return self._as_list(self._request("GET", "tasks"))
+
+    def device_status(self, did: str) -> dict | None:
+        body = self._request("GET", "device_status", did=did)
+        return body.get("data") if isinstance(body, dict) else body
+
+    def device_spec(self, did: str) -> dict | None:
+        body = self._request("GET", "device_spec", did=did)
+        return body.get("data") if isinstance(body, dict) else body
+
+    def device_history(self) -> dict | list | None:
+        body = self._request("GET", "device_history")
+        return body.get("data") if isinstance(body, dict) else body
+
+    def trigger_scene(self, scene_id: str) -> dict | None:
+        return self._request("POST", "scene_trigger", scene_id=scene_id)
+
+    def home_profile(self) -> dict | str | None:
+        """The rendered home memory/profile (preferences, habits, routines)."""
+        body = self._request("GET", "home_profile")
+        return body.get("data") if isinstance(body, dict) else body
+
+    def home_profile_entries(self) -> list[dict]:
+        return self._as_list(self._request("GET", "home_profile_entries"))
+
+    def scope_homes(self) -> list[dict]:
+        return self._as_list(self._request("GET", "scope_homes"))
+
+    def scope_cameras(self) -> list[dict]:
+        return self._as_list(self._request("GET", "scope_cameras"))
+
+    def send_notify(self, notify: dict) -> dict | None:
+        """Send a proactive notification (TTS / IM / Mi push) via Miloco."""
+        return self._request("POST", "send_notify", json_body={"notify": notify})
+
+    def refresh(self) -> dict | None:
+        """Refresh Miloco's device/scene/user caches from the Mi cloud."""
+        return self._request("POST", "refresh_all")
 
     def activities(self, since_ms: int | None = None, limit: int | None = None) -> list[dict]:
         """Recent meaningful home events (``/api/events``).
@@ -584,9 +635,15 @@ def sync_snapshot(settings: Settings, cfg: MilocoConfig | None = None) -> dict:
 
     snap["homes"] = client.homes()
     snap["devices"] = client.devices()
+    snap["cameras"] = client.cameras()
     snap["members"] = client.members()
     snap["automations"] = client.automations()
+    snap["tasks"] = client.tasks()
     snap["activities"] = client.activities(limit=cfg.activity_limit)
+    snap["scope_homes"] = client.scope_homes()
+    snap["scope_cameras"] = client.scope_cameras()
+    # The rendered home memory (preferences/habits/routines) — a key context item.
+    snap["home_profile"] = client.home_profile()
     try:
         snapshot_path(settings).write_text(
             json.dumps(snap, ensure_ascii=False, indent=2), "utf-8"

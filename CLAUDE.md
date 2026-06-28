@@ -65,9 +65,16 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr/integrations/miloco.py` — the **Miloco** Mi Home integration (replaces the
   old `miot` plugin). Talks to a local [Xiaomi Miloco](https://github.com/XiaoMi/xiaomi-miloco)
   service (`http://127.0.0.1:1810`, endpoints under `/api`, configurable in
-  `~/.ssr/miloco.json`). Provides: agent tools (`miloco_devices`,
-  `miloco_device_control`, `miloco_family`, `miloco_activities`,
-  `miloco_automations`, `miloco_sync`); a **bus event source**
+  `~/.ssr/miloco.json`; `MILOCO_*` env vars override the file and can
+  auto-discover Miloco's `server.token` via `MILOCO_CONFIG_FILE`). Provides: a
+  broad set of agent tools (`miloco_status`, `miloco_devices`,
+  `miloco_device_control`/`_status`/`_spec`, `miloco_trigger_scene`,
+  `miloco_cameras`, `miloco_family`, `miloco_activities`, `miloco_automations`,
+  `miloco_tasks`, `miloco_home_profile`, `miloco_scope`, `miloco_notify`,
+  `miloco_refresh`, `miloco_sync`); Miloco's official capability **skills**
+  (`plugins/skills`) are bundled into `ssr/builtin_skills/miloco-*` as the
+  agent's knowledge base (plus a `miloco-overview` adapter mapping them to the
+  `miloco_*` tools); a **bus event source**
   (`MilocoActivityBridge` polls Miloco activities and republishes each as a
   `miloco.activity.<type>` event, de-duped, so handler agents react to what
   happens at home); and a **persistent context** snapshot

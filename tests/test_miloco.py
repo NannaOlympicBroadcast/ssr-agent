@@ -135,6 +135,32 @@ def test_miloco_tools_registered_in_toolkit():
 
     expected = {
         "miloco_status", "miloco_devices", "miloco_device_control",
-        "miloco_family", "miloco_activities", "miloco_automations", "miloco_sync",
+        "miloco_device_status", "miloco_device_spec", "miloco_trigger_scene",
+        "miloco_cameras", "miloco_family", "miloco_activities",
+        "miloco_automations", "miloco_tasks", "miloco_home_profile",
+        "miloco_scope", "miloco_notify", "miloco_refresh", "miloco_sync",
     }
     assert expected <= set(dir(ToolKit))
+
+
+def test_miloco_skills_bundled():
+    # The Miloco capability skills are bundled as the agent's knowledge base.
+    from pathlib import Path
+    import ssr
+
+    skills_root = Path(ssr.__file__).resolve().parent / "builtin_skills"
+    bundled = {p.parent.name for p in skills_root.glob("miloco*/SKILL.md")}
+    # A representative spread across Miloco's capability areas + our adapter.
+    for name in ("miloco-overview", "miloco-devices", "miloco-notify",
+                 "miloco-home-profile", "miloco-miot-scope", "miloco-create-task"):
+        assert name in bundled, name
+
+
+def test_new_endpoints_present():
+    eps = ml.DEFAULT_ENDPOINTS
+    for name in ("device_status", "device_spec", "scene_trigger", "tasks",
+                 "home_profile", "scope_homes", "scope_cameras", "send_notify",
+                 "cameras", "refresh_all"):
+        assert name in eps, name
+    # The non-existent GET /scenes was removed (only POST trigger exists).
+    assert "scenes" not in eps

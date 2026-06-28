@@ -321,6 +321,67 @@ class ToolKit:
         from . import tools_miloco
         return tools_miloco.miloco_family(self.settings)
 
+    def miloco_device_status(self, did: str) -> str:
+        """Read a Mi Home device's current property values (on/off, temp, battery…).
+
+        Args:
+            did: Device id (``did``) from ``miloco_devices``.
+        """
+        from . import tools_miloco
+        return tools_miloco.miloco_device_status(self.settings, did)
+
+    def miloco_device_spec(self, did: str) -> str:
+        """Get a device's MIoT spec (siid/piid/aiid map) needed for control.
+
+        Args:
+            did: Device id (``did``) from ``miloco_devices``.
+        """
+        from . import tools_miloco
+        return tools_miloco.miloco_device_spec(self.settings, did)
+
+    def miloco_trigger_scene(self, scene_id: str) -> str:
+        """Trigger a Mi Home manual scene (回家/离家/睡眠…) by its scene id.
+
+        Args:
+            scene_id: The Mi Home scene id to run.
+        """
+        from . import tools_miloco
+        return tools_miloco.miloco_trigger_scene(self.settings, scene_id)
+
+    def miloco_cameras(self) -> str:
+        """List Mi Home cameras known to Miloco (online/connected state)."""
+        from . import tools_miloco
+        return tools_miloco.miloco_cameras(self.settings)
+
+    def miloco_tasks(self) -> str:
+        """List Miloco persistent home tasks (reminders / automations / habit stats)."""
+        from . import tools_miloco
+        return tools_miloco.miloco_tasks(self.settings)
+
+    def miloco_home_profile(self) -> str:
+        """Read the home memory/profile — family preferences, habits, routines, rules."""
+        from . import tools_miloco
+        return tools_miloco.miloco_home_profile(self.settings)
+
+    def miloco_scope(self) -> str:
+        """Show Miloco's perception scope — which homes and cameras it perceives."""
+        from . import tools_miloco
+        return tools_miloco.miloco_scope(self.settings)
+
+    def miloco_notify(self, notify_json: str) -> str:
+        """Send a proactive home notification via Miloco (speaker TTS / IM / Mi push).
+
+        Args:
+            notify_json: JSON ``notify`` payload, e.g. ``{"type":"tts","text":"该吃药了"}``.
+        """
+        from . import tools_miloco
+        return tools_miloco.miloco_notify(self.settings, notify_json)
+
+    def miloco_refresh(self) -> str:
+        """Refresh Miloco's device/scene/user caches from the Mi cloud."""
+        from . import tools_miloco
+        return tools_miloco.miloco_refresh(self.settings)
+
     def miloco_activities(self, limit: int = 20) -> str:
         """List recent meaningful home events/activities from Miloco (newest first).
 
@@ -597,9 +658,18 @@ class ToolKit:
             self.miloco_status,
             self.miloco_devices,
             self.miloco_device_control,
+            self.miloco_device_status,
+            self.miloco_device_spec,
+            self.miloco_trigger_scene,
+            self.miloco_cameras,
             self.miloco_family,
             self.miloco_activities,
             self.miloco_automations,
+            self.miloco_tasks,
+            self.miloco_home_profile,
+            self.miloco_scope,
+            self.miloco_notify,
+            self.miloco_refresh,
             self.miloco_sync,
             *self.arm_tools().callables(),
         ]
