@@ -59,8 +59,23 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
 - `ssr/plugins.py` + `ssr/builtin_plugins/` — bundled *plugins* (Claude-Code
   `.claude-plugin/plugin.json` + `.mcp.json` format) that contribute MCP servers,
   merged with `~/.ssr/mcp.json`. Ships `chrome-devtools`; supports shared
-  credentials via `${namespace.key}` → `~/.ssr/<namespace>.json` (e.g. the `miot`
-  plugin shares the `xiaomi` channel's credentials).
+  credentials via `${namespace.key}` → `~/.ssr/<namespace>.json`. (The former
+  `miot` plugin has been **removed** — Mi Home control now lives in the native
+  `miloco` integration below.)
+- `ssr/integrations/miloco.py` — the **Miloco** Mi Home integration (replaces the
+  old `miot` plugin). Talks to a local [Xiaomi Miloco](https://github.com/XiaoMi/xiaomi-miloco)
+  service (`http://127.0.0.1:1810`, endpoints under `/api`, configurable in
+  `~/.ssr/miloco.json`). Provides: agent tools (`miloco_devices`,
+  `miloco_device_control`, `miloco_family`, `miloco_activities`,
+  `miloco_automations`, `miloco_sync`); a **bus event source**
+  (`MilocoActivityBridge` polls Miloco activities and republishes each as a
+  `miloco.activity.<type>` event, de-duped, so handler agents react to what
+  happens at home); and a **persistent context** snapshot
+  (`ssr miloco sync` → `~/.ssr/miloco/snapshot.json`, surfaced as REFS items by
+  `load_miloco_context`). CLI: `ssr miloco <config|status|sync|devices|family|
+  activities|automations|bridge>`. Miloco runs natively on macOS/Linux only; on
+  **Windows it must run in Docker** (`ensure_native_supported` raises with that
+  guidance, and the gateway defaults to Docker on Windows).
 - `ssr/channels/` — IM/voice channels: `feishu`, `wechat`, and `xiaomi` (XiaoAI
   speaker: polls the Mi cloud **conversation-history API** for speech and replies
   via TTS — pausing playback first, and using the MiIO `play-text` action where
@@ -80,10 +95,13 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   servers are killed (no orphan leak) and children are tied to the parent via a
   Windows Job object), `gateway` (`ssr gateway` — installs a channel-bound
   instance as a **system service** per OS: systemd user unit / launchd plist /
-  **Windows nssm** (a real Windows service via `nssm install`/`set` —
-  `SERVICE_AUTO_START` + restart throttle; falls back to a scheduled task if
-  nssm is absent); records in
-  `~/.ssr/gateways.json`, the service runs `ssr gateway run <name>`).
+  **Windows → Docker** (the native nssm / Scheduled-Task backends are
+  **deprecated**: on Windows the gateway runs in a Docker container by default —
+  `--restart unless-stopped`, host `~/.ssr` bind-mounted in, `MILOCO_BASE_URL`
+  → `host.docker.internal`; falls back to nssm/schtasks only if Docker is
+  absent. Force Docker anywhere with `SSR_GATEWAY_BACKEND=docker`); records in
+  `~/.ssr/gateways.json`, the service runs `ssr gateway run <name>` (which also
+  starts the Miloco activity→bus bridge).
 - Container deployment: `Dockerfile` + `docker-compose.yml` (`SSR_HOME=/data/.ssr`
   on the `ssr-data` volume; entrypoint runs `ssr init` then `ssr <command>`).
 
@@ -134,6 +152,9 @@ needs the key; `srdb.eval` is full in-process Python, so it's debug-only.
 - `ssr task create <name> "<prompt>" --cron "*/30 * * * *"` — pm2 task
 - `ssr feishu configure` — set up the Lark bot
 - `ssr channel config xiaomi` / `ssr channel on xiaomi` — XiaoAI speaker channel
+- `ssr miloco status` / `ssr miloco sync` / `ssr miloco bridge` — Mi Home (Miloco)
+  integration: check the local Miloco service, snapshot the home into context,
+  and stream home activities onto the bus
 - `ssr bus serve` — run a remote bus server; `ssr bus send <topic> '<json>'` /
   `ssr bus listen '<pattern>'` / `ssr bus status` — talk to it from the CLI
 - `ssr srdb agents <tcp-link>` / `ssr srdb eval <tcp-link> '<python>'` /

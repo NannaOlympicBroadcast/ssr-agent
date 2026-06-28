@@ -47,10 +47,26 @@ services:
     environment:
       SSR_HOME: /data/.ssr
       DEFAULT_MODEL: ${DEFAULT_MODEL:-gemini-3.1-flash-lite}
+      # Reach the Xiaomi Miloco service (Mi Home gateway). Point this at a
+      # `miloco` service, the Docker host (host.docker.internal:1810), or a LAN
+      # host running Miloco. On Windows, running the channel/gateway in Docker
+      # like this is the *default* way to use Miloco (it can't run natively).
+      MILOCO_BASE_URL: ${MILOCO_BASE_URL:-http://host.docker.internal:1810}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ssr-data:/data
-    # Change "xiaomi" to feishu / wechat / all as needed.
+    # Change "xiaomi" to feishu / wechat / all as needed. The channel gateway
+    # also starts the Miloco activity → bus bridge automatically.
     command: ["channel", "on", "xiaomi"]
+
+# ---- Xiaomi Miloco (Mi Home perceptive gateway) ------------------------
+# Miloco is a separate project (https://github.com/XiaoMi/xiaomi-miloco) that
+# runs natively on macOS/Linux only — on Windows it MUST run in Docker, which
+# is why this compose file is the default deployment path there. Run Miloco on
+# the Docker host (`miloco-cli dashboard`) and SSR reaches it via
+# host.docker.internal, or add a `miloco` service here from its own image and
+# set MILOCO_BASE_URL=http://miloco:1810.
 
 volumes:
   ssr-data:

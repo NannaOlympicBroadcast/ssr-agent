@@ -76,7 +76,7 @@ ssr channel config feishu  # configure Feishu channel (alias: configure)
 ssr channel on feishu      # start listening on Feishu channel (alias: serve)
 ssr channel config wechat  # configure WeChat channel (scanning QR code to log in; network-resilient status checks handling wait, scanned, expired, canceled, timeout, and customized error message responses; press Ctrl+C to cancel)
 ssr channel on wechat      # start listening on WeChat channel (with dynamic X-WECHAT-UIN headers, full base_info / client_id payload alignment, incoming image message decryption support, auto-exit on session timeout, robust media/file send support, and verbose logging for API calls)
-ssr channel config xiaomi          # configure Xiaomi speaker channel (shares credentials with the miot plugin)
+ssr channel config xiaomi          # configure Xiaomi speaker channel (XiaoAI speaker, Mi passport login)
 ssr channel login xiaomi --browser # open a real Chrome, log in, auto-harvest the token via DevTools (handles Mi safety verification)
 ssr channel login xiaomi --pass-token <PT> --user-id <UID>  # or import passToken+userId from a logged-in browser (i.mi.com cookies)
 ssr channel on xiaomi              # start listening on Xiaomi speaker channel (polls cloud conversation history; replies via TTS, pausing playback first so the reply is audible)
@@ -134,10 +134,15 @@ command works on all three platforms, using each one's native service manager:
 | --- | --- | --- |
 | Linux | systemd **user** unit (`systemctl --user`) | `~/.config/systemd/user/ssr-gateway-<name>.service` |
 | macOS | launchd LaunchAgent (`launchctl`) | `~/Library/LaunchAgents/com.ssr.gateway.<name>.plist` |
-| Windows | **nssm** (a real Windows service, auto-start at boot) | service `ssr-gateway-<name>` (`nssm install`/`set`) |
+| Windows | **Docker** container (`--restart unless-stopped`) | container `ssr-gateway-<name>` |
 
-On Windows, if nssm is not installed it falls back to a Scheduled Task at logon
-(`schtasks`, `~/.ssr/gateways/<name>.cmd`).
+On **Windows the native service backend is deprecated**: because the Miloco Mi
+Home integration (and a clean POSIX runtime for the channels) can't run natively
+on Windows, the gateway runs in a **Docker container** by default — auto-started
+on boot and auto-restarted on failure by the Docker daemon, with the host
+`~/.ssr` bind-mounted in. If Docker is unavailable it falls back to the legacy
+**nssm** service (or a Scheduled Task at logon when nssm is absent). Force the
+Docker backend on any platform with `SSR_GATEWAY_BACKEND=docker`.
 
 ```bash
 # Configure the channel once, then install it as a service:
@@ -154,8 +159,8 @@ ssr gateway uninstall name        # stop, remove the unit, drop the record
 ```
 
 Memory is read per platform: systemd's cgroup `MemoryCurrent` on Linux, `ps`
-RSS on macOS, and the process `WorkingSetSize` on Windows (matched by command
-line, so it works under both nssm and the Scheduled-Task fallback). Install
+RSS on macOS, and `docker stats` for the container on Windows (the deprecated
+nssm/Scheduled-Task fallback reads the process `WorkingSetSize`). Install
 [`psutil`](https://pypi.org/project/psutil/) for thread counts and `--cpu`
 sampling (optional — it degrades gracefully without it).
 
@@ -167,16 +172,17 @@ installed with, and pins `SSR_HOME` so it finds your config and tokens.
 Notes:
 - **Linux:** user services stop when you log out unless lingering is enabled —
   run `loginctl enable-linger $USER` for always-on. Logs: `journalctl --user -u ssr-gateway-<name> -f`.
-- **Windows:** runs as a real Windows service via **nssm**, set to
-  `SERVICE_AUTO_START` so it comes up on boot, with a restart throttle
-  (`AppThrottle` 15s + `AppRestartDelay` 2s) so a crashing gateway can't spawn
-  endlessly. Installing/removing a service needs an **Administrator** terminal.
-  Get nssm from [nssm.cc](https://nssm.cc/) or `choco install nssm` /
-  `scoop install nssm`. Output goes to `~/.ssr/logs/gateway-<name>.log`; manage
-  it with `nssm status ssr-gateway-<name>` or `nssm edit ssr-gateway-<name>`.
+- **Windows (Docker, default):** the gateway runs as a container
+  `ssr-gateway-<name>` from the `ssr-agent` image, `--restart unless-stopped`
+  (auto-start on boot, auto-restart on crash), with the host `~/.ssr`
+  bind-mounted at `/data/.ssr` and `MILOCO_BASE_URL` pointing at
+  `host.docker.internal:1810` so it reaches a Miloco service on the host. Build
+  the image first (`docker build -t ssr-agent:latest .`) or set
+  `SSR_DOCKER_IMAGE`. Logs: `docker logs -f ssr-gateway-<name>`. The legacy
+  **nssm** service is used only when Docker is absent.
 - **macOS:** stdout/stderr are written to `~/.ssr/logs/gateway-<name>.log`.
-- If no native manager is available (e.g. a minimal container), the gateway is
-  still saved and run-instructions are printed — use Docker or nssm instead.
+- If no manager is available (e.g. a minimal container without Docker), the
+  gateway is still saved and run-instructions are printed.
 
 ### Docker deployment
 
@@ -200,7 +206,7 @@ The image entrypoint scaffolds `~/.ssr` (idempotent `ssr init`) and then execs
 `ssr <command>`. Override `command:` in compose (or `docker run … ssr <args>`)
 to serve a different channel (`channel on feishu|wechat|all`) or a gateway.
 Build with `--build-arg INSTALL_NODE=true` to also bundle Node.js for the
-chrome-devtools / miot MCP plugins.
+chrome-devtools MCP plugin.
 
 ### Remote control (`ssr rc`) — removed
 
@@ -336,7 +342,38 @@ Automatically discovers and loads Claude-Code/Codex-style plugins (which have `.
 
 ### Built-in Plugins
 
-*   **`miot`**: A built-in Xiaomi Home (MIoT) device control plugin. It is automatically installed into `~/.ssr/plugins/miot` during initialization. It provides comprehensive tools for discovering, querying, and controlling your Xiaomi smart devices (like lights, outlets, sensors, etc.).
+*   **`chrome-devtools`**: Wraps [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) for browser automation, debugging and performance analysis.
+
+> **Note:** the former `miot` MCP plugin has been **removed**. Xiaomi Mi Home
+> device control, family/identity, home events and automations are now provided
+> by the native **Miloco** integration — see [Mi Home via Miloco](#mi-home-via-miloco) below.
+
+### Mi Home via Miloco
+
+SSR integrates with [Xiaomi Miloco](https://github.com/XiaoMi/xiaomi-miloco), the
+official open-source "perceptive home" gateway, instead of a third-party MIoT MCP
+server. Run Miloco locally (it binds your Mi account and exposes an HTTP API on
+`http://127.0.0.1:1810`), then:
+
+```bash
+ssr miloco config        # set the Miloco base_url / API key (~/.ssr/miloco.json)
+ssr miloco status        # is Miloco reachable? is the Mi account bound?
+ssr miloco sync          # snapshot devices/family/events/automations into context
+ssr miloco devices       # list Mi Home devices
+ssr miloco activities    # recent home events
+ssr miloco bridge        # stream home activities onto the SSR bus (foreground)
+```
+
+The agent gets tools `miloco_devices`, `miloco_device_control`, `miloco_family`,
+`miloco_activities`, `miloco_automations` and `miloco_sync`. Home **activities**
+become `miloco.activity.<type>` bus events (so a handler agent can react to a
+person arriving, a sensor tripping, a hazard being detected), and a synced
+**snapshot** of devices / family members / events / automations is surfaced as
+persistent context.
+
+> Miloco runs natively on **macOS / Linux only**. On **Windows it must run in
+> Docker** — which is also why the SSR gateway defaults to a Docker backend on
+> Windows. SSR raises a clear "use Docker" message rather than failing silently.
 
 ### HTTP/SSE MCP
 
