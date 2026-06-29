@@ -71,6 +71,11 @@ def run_instruction(settings, instruction: str, bus_url: str | None = None,
     )
     if console:
         console.print(f"[bold]User:[/bold] {instruction}")
+        # Build marker — if you don't see this line, the installed ssr-agent is an
+        # OLD build (reinstall it): the idle-timeout + completion watchdog below
+        # only exist here.
+        console.print(f"[dim]arm driver: auto-approve on, idle-timeout={timeout:.0f}s, "
+                      f"completion watchdog active[/dim]")
         console.print(f"[dim]bus={url or 'embedded'} — awaiting the Isaac bridge…[/dim]")
     reply = agent.run(prompt)
     if console:
