@@ -44,7 +44,8 @@ class XiaomiConfig:
     auto_approve: bool = True       # speaker has no good approval UX → allow all commands by default
     default_cwd: str = ""           # starting working directory (not a hard limit)
     tts_command: str = ""           # MiIO play-text action "siid-aiid" (e.g. "5-1"); auto by hardware if empty
-    # Used by the bundled ``miot`` plugin's ${xiaomi.*} placeholders:
+    # Legacy field retained for backward compatibility with old xiaomi.json files
+    # (was consumed by the removed ``miot`` plugin's ${xiaomi.*} placeholders).
     miot_mcp_command: str = ""
 
     @classmethod

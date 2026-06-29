@@ -1,5 +1,0 @@
-{
-  "name": "miot",
-  "version": "0.1.15",
-  "description": "Xiaomi MIoT Home Device Control plugin. 说明/Note: 如果用户没有登录miot（agent无法探测到miot服务器或工具不可用），则agent会直接通过内置或已安装的 login_to_miot.py 脚本（如 ~/.ssr/plugins/miot/login_to_miot.py 或 ssr/builtin_plugins/miot/login_to_miot.py）以 run_command 工具来让用户登录。"
-}

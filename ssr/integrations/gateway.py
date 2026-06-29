@@ -142,6 +142,16 @@ def run_gateway(settings: Settings, name: str) -> int:
     if gw.cwd:
         settings.project_dir = Path(gw.cwd).expanduser()
 
+    # Bridge Miloco home activities onto the bus so handler agents can react to
+    # what happens at home. Best-effort: never let it stop the gateway serving.
+    try:
+        from ssr.integrations.miloco import start_bridge_via_busclient
+
+        if start_bridge_via_busclient(settings) is not None:
+            print("[miloco] activity → bus bridge started")
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"[miloco] activity bridge not started: {e}")
+
     if gw.channel == "all":
         threads = []
         for ch in registry.list_channels():
@@ -778,6 +788,122 @@ class NssmWindowsManager(ServiceManager):
         return st
 
 
+class DockerManager(ServiceManager):
+    """Run the gateway as a Docker container — the **default on Windows**.
+
+    Miloco (and a clean POSIX runtime for the channels) cannot run natively on
+    Windows, so the Windows gateway is deprecated in favour of a container: the
+    same ``ssr-agent`` image runs ``ssr gateway run <name>`` with ``--restart
+    unless-stopped`` (auto-start on boot via the Docker daemon, auto-restart on
+    failure). The host ``~/.ssr`` is bind-mounted in so the container shares the
+    gateway record, credentials and Miloco config; ``MILOCO_BASE_URL`` defaults
+    to ``host.docker.internal`` so the gateway reaches a Miloco service running
+    on the host (or its own ``miloco`` container).
+
+    Works on any OS where Docker is available; selectable everywhere with
+    ``SSR_GATEWAY_BACKEND=docker``.
+    """
+
+    backend = "docker (container)"
+
+    def _image(self) -> str:
+        return os.environ.get("SSR_DOCKER_IMAGE", "ssr-agent:latest")
+
+    def _container(self, name: str) -> str:
+        return service_id(name)
+
+    def available(self) -> bool:
+        if shutil.which("docker") is None:
+            return False
+        return _run(["docker", "info"]).returncode == 0
+
+    def _run_args(self, settings: Settings, gw: Gateway) -> list[str]:
+        cont = self._container(gw.name)
+        home = str(settings.home)
+        env = service_env(settings, gw)
+        # Reach a Miloco service on the host unless the user pinned a URL.
+        env.setdefault("MILOCO_BASE_URL", "http://host.docker.internal:1810")
+        env["SSR_HOME"] = "/data/.ssr"
+        args = [
+            "docker", "run", "-d", "--name", cont,
+            "--restart", "unless-stopped",
+            # Let the container resolve the Docker host (for host-run Miloco).
+            "--add-host", "host.docker.internal:host-gateway",
+            "-v", f"{home}:/data/.ssr",
+        ]
+        for k, v in env.items():
+            args += ["-e", f"{k}={v}"]
+        args += [self._image(), "gateway", "run", gw.name]
+        return args
+
+    def install(self, settings: Settings, gw: Gateway, start: bool = True) -> str:
+        cont = self._container(gw.name)
+        # Re-create cleanly so repeated installs don't clash on the name.
+        _run(["docker", "rm", "-f", cont])
+        res = _run(self._run_args(settings, gw))
+        if res.returncode != 0:
+            err = _out(res)
+            hint = ""
+            if "no such image" in err.lower() or "not found" in err.lower():
+                hint = (
+                    "\n镜像缺失。请先构建： docker build -t ssr-agent:latest . "
+                    "（或设置 SSR_DOCKER_IMAGE 指向已有镜像）。"
+                )
+            return f"[!] docker run 失败：{err}{hint}"
+        msg = (
+            f"已通过 Docker 启动网关容器 {cont}（--restart unless-stopped，开机自启/崩溃自重启）。\n"
+            f"镜像：{self._image()}  挂载：{settings.home} → /data/.ssr\n"
+            f"查看日志： docker logs -f {cont}    停止： ssr gateway stop {gw.name}"
+        )
+        return msg if start else msg + "\n(注意：Docker 容器创建即运行。)"
+
+    def uninstall(self, settings: Settings, name: str) -> str:
+        cont = self._container(name)
+        res = _run(["docker", "rm", "-f", cont])
+        return _out(res) or f"已移除网关容器 {cont}。"
+
+    def start(self, settings: Settings, name: str) -> str:
+        res = _run(["docker", "start", self._container(name)])
+        return _out(res) or f"{self._container(name)} 已启动"
+
+    def stop(self, settings: Settings, name: str) -> str:
+        res = _run(["docker", "stop", self._container(name)])
+        return _out(res) or f"{self._container(name)} 已停止"
+
+    def restart(self, settings: Settings, name: str) -> str:
+        res = _run(["docker", "restart", self._container(name)])
+        return _out(res) or f"{self._container(name)} 已重启"
+
+    def status(self, settings: Settings, name: str) -> str:
+        res = _run(["docker", "inspect", "-f", "{{.State.Status}}", self._container(name)])
+        if res.returncode != 0:
+            return "not installed"
+        return _out(res) or "unknown"
+
+    def stats(self, settings: Settings, name: str) -> dict:
+        st = _empty_stats()
+        cont = self._container(name)
+        ins = _run(["docker", "inspect", "-f", "{{.State.Running}} {{.State.Pid}}", cont])
+        parts = _out(ins).split()
+        if len(parts) == 2:
+            st["running"] = parts[0].lower() == "true"
+            st["pid"] = int(parts[1]) if parts[1].isdigit() and parts[1] != "0" else None
+        # Memory via a one-shot docker stats (best-effort; bytes from e.g. "123MiB").
+        sres = _run(["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", cont])
+        usage = _out(sres).split("/")[0].strip()
+        try:
+            num = float("".join(c for c in usage if c.isdigit() or c == "."))
+            unit = "".join(c for c in usage if c.isalpha()).upper()
+            factor = {"B": 1, "KIB": 1024, "MIB": 1024**2, "GIB": 1024**3,
+                      "KB": 1000, "MB": 1000**2, "GB": 1000**3}.get(unit)
+            if factor and num:
+                st["rss"] = int(num * factor)
+                st["source"] = "docker stats MemUsage"
+        except ValueError:
+            pass
+        return st
+
+
 def gather_stats(settings: Settings, name: str, with_cpu: bool = False) -> dict:
     """Normalized live stats for a gateway, enriched with psutil when available.
 
@@ -806,13 +932,24 @@ def gather_stats(settings: Settings, name: str, with_cpu: bool = False) -> dict:
 def get_manager() -> ServiceManager:
     system = platform.system()
     mgr: ServiceManager
+
+    # Explicit override: force the Docker backend on any OS.
+    if os.environ.get("SSR_GATEWAY_BACKEND", "").lower() == "docker":
+        docker = DockerManager()
+        return docker if docker.available() else _NullManager()
+
     if system == "Linux":
         mgr = SystemdManager()
     elif system == "Darwin":
         mgr = LaunchdManager()
     elif system == "Windows":
-        # Prefer nssm (a real Windows service); fall back to a Scheduled Task
-        # when nssm is not installed so the gateway still works out of the box.
+        # The native Windows gateway (nssm / Scheduled Task) is DEPRECATED:
+        # Miloco and the channels need a POSIX runtime, so on Windows the gateway
+        # runs in Docker by default. Fall back to the legacy nssm / schtasks
+        # backends only when Docker is unavailable, so existing setups still work.
+        docker = DockerManager()
+        if docker.available():
+            return docker
         nssm_mgr = NssmWindowsManager()
         mgr = nssm_mgr if nssm_mgr.available() else WindowsTaskManager()
     else:

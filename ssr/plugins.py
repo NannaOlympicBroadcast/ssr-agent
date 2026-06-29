@@ -21,8 +21,10 @@ Credential sharing
 A plugin may declare ``"credentials": "<namespace>"`` in its ``plugin.json``. Any
 ``${<namespace>.key}`` placeholder appearing in its server ``command``/``args``/
 ``env`` is filled from the shared JSON credential file ``~/.ssr/<namespace>.json``.
-This is how the bundled ``miot`` plugin shares the Xiaomi account credentials
-with the ``xiaomi`` channel — both read ``~/.ssr/xiaomi.json``.
+For example a plugin may reference ``${xiaomi.account}`` to reuse the ``xiaomi``
+channel's credentials in ``~/.ssr/xiaomi.json``. (The former bundled ``miot``
+plugin used this; Mi Home control now lives in the native Miloco integration —
+see :mod:`ssr.integrations.miloco`.)
 """
 
 from __future__ import annotations
