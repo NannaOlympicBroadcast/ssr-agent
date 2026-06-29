@@ -247,3 +247,132 @@ def miloco_sync(settings: Settings) -> str:
     counts = {k: len(snap.get(k) or []) for k in keys}
     counts["home_profile"] = bool(snap.get("home_profile"))
     return f"已同步 Miloco 上下文快照：{json.dumps(counts, ensure_ascii=False)} → {ml.snapshot_path(settings)}"
+
+
+class MilocoTools:
+    """Agent tools for the Xiaomi Miloco (Mi Home) integration, bound to a
+    :class:`~ssr.agent.tools.ToolKit`.
+
+    Contributed in-process by the bundled ``miloco`` plugin (``agent_tools``) — the
+    same mechanism the ``openarm`` plugin uses — rather than being hardcoded into the
+    core ToolKit. Each tool is a thin wrapper over the module functions above.
+    """
+
+    def __init__(self, toolkit):
+        self.toolkit = toolkit
+
+    @property
+    def _settings(self) -> Settings:
+        return self.toolkit.settings
+
+    def miloco_status(self) -> str:
+        """Check the Xiaomi Miloco home service: reachable? Mi account bound?"""
+        return miloco_status(self._settings)
+
+    def miloco_devices(self) -> str:
+        """List Mi Home devices known to Miloco (id/did, name, room, online)."""
+        return miloco_devices(self._settings)
+
+    def miloco_device_control(self, did: str, action_json: str) -> str:
+        """Control a Mi Home device via Miloco.
+
+        Args:
+            did: Device id (``did``) from ``miloco_devices``.
+            action_json: Miloco DeviceControlRequest JSON, e.g.
+                ``{"type":"set_property","iid":"prop.2.1","value":true}`` (iid is
+                ``prop.{siid}.{piid}`` — get siid/piid from ``miloco_device_spec``);
+                or ``{"type":"call_action","iid":"action.2.1","params":[]}``.
+        """
+        return miloco_device_control(self._settings, did, action_json)
+
+    def miloco_device_status(self, did: str) -> str:
+        """Read a Mi Home device's current property values (on/off, temp, battery…).
+
+        Args:
+            did: Device id (``did``) from ``miloco_devices``.
+        """
+        return miloco_device_status(self._settings, did)
+
+    def miloco_device_spec(self, did: str) -> str:
+        """Get a device's MIoT spec (siid/piid/aiid map) needed for control.
+
+        Args:
+            did: Device id (``did``) from ``miloco_devices``.
+        """
+        return miloco_device_spec(self._settings, did)
+
+    def miloco_trigger_scene(self, scene_id: str) -> str:
+        """Trigger a Mi Home manual scene (回家/离家/睡眠…) by its scene id.
+
+        Args:
+            scene_id: The Mi Home scene id to run.
+        """
+        return miloco_trigger_scene(self._settings, scene_id)
+
+    def miloco_cameras(self) -> str:
+        """List Mi Home cameras known to Miloco (online/connected state)."""
+        return miloco_cameras(self._settings)
+
+    def miloco_family(self) -> str:
+        """List recognised family members / persons in Miloco's identity library."""
+        return miloco_family(self._settings)
+
+    def miloco_activities(self, limit: int = 20) -> str:
+        """List recent meaningful home events/activities from Miloco (newest first).
+
+        Args:
+            limit: Max number of events to return (1–200).
+        """
+        return miloco_activities(self._settings, limit)
+
+    def miloco_automations(self) -> str:
+        """List Miloco automation rules (triggers / conditions / actions)."""
+        return miloco_automations(self._settings)
+
+    def miloco_tasks(self) -> str:
+        """List Miloco persistent home tasks (reminders / automations / habit stats)."""
+        return miloco_tasks(self._settings)
+
+    def miloco_home_profile(self) -> str:
+        """Read the home memory/profile — family preferences, habits, routines, rules."""
+        return miloco_home_profile(self._settings)
+
+    def miloco_scope(self) -> str:
+        """Show Miloco's perception scope — which homes and cameras it perceives."""
+        return miloco_scope(self._settings)
+
+    def miloco_notify(self, message: str) -> str:
+        """Send a proactive home notification via Miloco (speaker TTS / IM / Mi push).
+
+        Args:
+            message: The notification text to deliver.
+        """
+        return miloco_notify(self._settings, message)
+
+    def miloco_refresh(self) -> str:
+        """Refresh Miloco's device/scene/user caches from the Mi cloud."""
+        return miloco_refresh(self._settings)
+
+    def miloco_sync(self) -> str:
+        """Refresh the cached Miloco context snapshot (devices/family/events/rules)."""
+        return miloco_sync(self._settings)
+
+    def callables(self) -> list:
+        return [
+            self.miloco_status,
+            self.miloco_devices,
+            self.miloco_device_control,
+            self.miloco_device_status,
+            self.miloco_device_spec,
+            self.miloco_trigger_scene,
+            self.miloco_cameras,
+            self.miloco_family,
+            self.miloco_activities,
+            self.miloco_automations,
+            self.miloco_tasks,
+            self.miloco_home_profile,
+            self.miloco_scope,
+            self.miloco_notify,
+            self.miloco_refresh,
+            self.miloco_sync,
+        ]

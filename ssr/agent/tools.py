@@ -309,114 +309,10 @@ class ToolKit:
         from .tools_push import push_notification_impl
         return push_notification_impl(self.settings, channel, target, message)
 
-    # ----------------------------------------------------------- miloco (home)
-    def miloco_status(self) -> str:
-        """Check the Xiaomi Miloco home service: reachable? Mi account bound?"""
-        from . import tools_miloco
-        return tools_miloco.miloco_status(self.settings)
-
-    def miloco_devices(self) -> str:
-        """List Mi Home devices known to Miloco (id/did, name, room, online)."""
-        from . import tools_miloco
-        return tools_miloco.miloco_devices(self.settings)
-
-    def miloco_device_control(self, did: str, action_json: str) -> str:
-        """Control a Mi Home device via Miloco.
-
-        Args:
-            did: Device id (``did``) from ``miloco_devices``.
-            action_json: Miloco DeviceControlRequest JSON, e.g.
-                ``{"type":"set_property","iid":"prop.2.1","value":true}`` (iid is
-                ``prop.{siid}.{piid}`` — get siid/piid from ``miloco_device_spec``);
-                or ``{"type":"call_action","iid":"action.2.1","params":[]}``.
-        """
-        from . import tools_miloco
-        return tools_miloco.miloco_device_control(self.settings, did, action_json)
-
-    def miloco_family(self) -> str:
-        """List recognised family members / persons in Miloco's identity library."""
-        from . import tools_miloco
-        return tools_miloco.miloco_family(self.settings)
-
-    def miloco_device_status(self, did: str) -> str:
-        """Read a Mi Home device's current property values (on/off, temp, battery…).
-
-        Args:
-            did: Device id (``did``) from ``miloco_devices``.
-        """
-        from . import tools_miloco
-        return tools_miloco.miloco_device_status(self.settings, did)
-
-    def miloco_device_spec(self, did: str) -> str:
-        """Get a device's MIoT spec (siid/piid/aiid map) needed for control.
-
-        Args:
-            did: Device id (``did``) from ``miloco_devices``.
-        """
-        from . import tools_miloco
-        return tools_miloco.miloco_device_spec(self.settings, did)
-
-    def miloco_trigger_scene(self, scene_id: str) -> str:
-        """Trigger a Mi Home manual scene (回家/离家/睡眠…) by its scene id.
-
-        Args:
-            scene_id: The Mi Home scene id to run.
-        """
-        from . import tools_miloco
-        return tools_miloco.miloco_trigger_scene(self.settings, scene_id)
-
-    def miloco_cameras(self) -> str:
-        """List Mi Home cameras known to Miloco (online/connected state)."""
-        from . import tools_miloco
-        return tools_miloco.miloco_cameras(self.settings)
-
-    def miloco_tasks(self) -> str:
-        """List Miloco persistent home tasks (reminders / automations / habit stats)."""
-        from . import tools_miloco
-        return tools_miloco.miloco_tasks(self.settings)
-
-    def miloco_home_profile(self) -> str:
-        """Read the home memory/profile — family preferences, habits, routines, rules."""
-        from . import tools_miloco
-        return tools_miloco.miloco_home_profile(self.settings)
-
-    def miloco_scope(self) -> str:
-        """Show Miloco's perception scope — which homes and cameras it perceives."""
-        from . import tools_miloco
-        return tools_miloco.miloco_scope(self.settings)
-
-    def miloco_notify(self, message: str) -> str:
-        """Send a proactive home notification via Miloco (speaker TTS / IM / Mi push).
-
-        Args:
-            message: The notification text to deliver.
-        """
-        from . import tools_miloco
-        return tools_miloco.miloco_notify(self.settings, message)
-
-    def miloco_refresh(self) -> str:
-        """Refresh Miloco's device/scene/user caches from the Mi cloud."""
-        from . import tools_miloco
-        return tools_miloco.miloco_refresh(self.settings)
-
-    def miloco_activities(self, limit: int = 20) -> str:
-        """List recent meaningful home events/activities from Miloco (newest first).
-
-        Args:
-            limit: Max number of events to return (1–200).
-        """
-        from . import tools_miloco
-        return tools_miloco.miloco_activities(self.settings, limit)
-
-    def miloco_automations(self) -> str:
-        """List Miloco automation rules (triggers / conditions / actions)."""
-        from . import tools_miloco
-        return tools_miloco.miloco_automations(self.settings)
-
-    def miloco_sync(self) -> str:
-        """Refresh the cached Miloco context snapshot (devices/family/events/rules)."""
-        from . import tools_miloco
-        return tools_miloco.miloco_sync(self.settings)
+    # NOTE: the miloco_* (Mi Home) tools used to live here as ToolKit methods. They
+    # are now contributed in-process by the bundled `miloco` plugin
+    # (agent_tools -> ssr.agent.tools_miloco:MilocoTools), like the openarm arm_*
+    # tools — so Mi Home control is a toggleable plugin, not core.
 
     def update_plan(self, steps: list[str]) -> str:
         """Record the current step-by-step plan for the task.
@@ -772,24 +668,8 @@ class ToolKit:
             self.bus_remove_handler,
             self.bus_listeners,
             self.bus_history,
-            # Native Miloco (Mi Home) integration tools.
-            self.miloco_status,
-            self.miloco_devices,
-            self.miloco_device_control,
-            self.miloco_device_status,
-            self.miloco_device_spec,
-            self.miloco_trigger_scene,
-            self.miloco_cameras,
-            self.miloco_family,
-            self.miloco_activities,
-            self.miloco_automations,
-            self.miloco_tasks,
-            self.miloco_home_profile,
-            self.miloco_scope,
-            self.miloco_notify,
-            self.miloco_refresh,
-            self.miloco_sync,
-            # In-process tools contributed by enabled plugins (e.g. openarm's arm_*).
+            # In-process tools contributed by enabled plugins: openarm's arm_* and
+            # miloco's miloco_* (Mi Home) both arrive here, not hardcoded.
             *self._plugin_tool_callables(),
         ]
 

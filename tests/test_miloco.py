@@ -149,9 +149,12 @@ def test_snapshot_and_context_loader():
         assert all(i.metadata.get("kind") == "miloco" for i in items)
 
 
-def test_miloco_tools_registered_in_toolkit():
-    # The miloco tools must be exposed to the model.
+def test_miloco_tools_exposed_via_plugin():
+    # Mi Home control is now the bundled `miloco` plugin (agent_tools ->
+    # MilocoTools), not hardcoded on ToolKit — but the tools must still reach the
+    # model through ToolKit.callables().
     from ssr.agent.tools import ToolKit
+    from ssr.agent.tools_miloco import MilocoTools
 
     expected = {
         "miloco_status", "miloco_devices", "miloco_device_control",
@@ -160,7 +163,31 @@ def test_miloco_tools_registered_in_toolkit():
         "miloco_automations", "miloco_tasks", "miloco_home_profile",
         "miloco_scope", "miloco_notify", "miloco_refresh", "miloco_sync",
     }
-    assert expected <= set(dir(ToolKit))
+    # MilocoTools advertises exactly these.
+    assert {fn.__name__ for fn in MilocoTools(None).callables()} == expected
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        settings = Settings(home=Path(tmpdir) / "home", project_dir=Path(tmpdir) / "proj")
+        settings.ensure_dirs()
+        tk = ToolKit(settings, retriever=None, memory=None)
+        names = {fn.__name__ for fn in tk.callables()}
+        # ...and they arrive in the toolkit via the enabled miloco plugin.
+        assert expected <= names
+        # disabling the plugin removes them
+        from ssr import plugins
+        plugins.set_plugin_enabled(settings, "miloco", False)
+        names_off = {fn.__name__ for fn in ToolKit(settings, retriever=None, memory=None).callables()}
+        assert not (expected & names_off)
+
+
+def test_miloco_builtin_plugin_manifest():
+    from ssr import plugins
+    with tempfile.TemporaryDirectory() as tmpdir:
+        settings = Settings(home=Path(tmpdir) / "home", project_dir=Path(tmpdir) / "proj")
+        settings.ensure_dirs()
+        rows = {p["name"]: p for p in plugins.list_plugins(settings)}
+        assert "miloco" in rows
+        assert rows["miloco"]["agent_tools"] == ["ssr.agent.tools_miloco:MilocoTools"]
 
 
 def test_miloco_skills_bundled():

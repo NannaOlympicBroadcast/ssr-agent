@@ -74,10 +74,12 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   `~/.ssr/plugins.json`; MCP servers also merge with `~/.ssr/mcp.json`. Shared
   credentials via `${namespace.key}` → `~/.ssr/<namespace>.json` (e.g. a plugin can
   reference `${xiaomi.account}` to reuse the `xiaomi` channel's credentials). Ships
-  `chrome-devtools` and `openarm` (the OpenArm/Isaac-Lab arm-control tools —
-  `arm_*` — which used to be the removed `ssr arm` command; now an agent-tools
-  plugin driven from any session over the bus). (The former `miot` plugin has been
-  **removed** — Mi Home control now lives in the native `miloco` integration below.)
+  `chrome-devtools`, `openarm` (the OpenArm/Isaac-Lab arm-control `arm_*` tools —
+  formerly the removed `ssr arm` command), and `miloco` (the Mi Home `miloco_*`
+  tools, see below) — both `openarm` and `miloco` contribute their tools in-process
+  via `agent_tools` and are toggleable with `ssr plugin disable <name>`. (The former
+  `miot` plugin was **removed** — Mi Home control now lives in the `miloco`
+  integration below.)
 - `ssr/integrations/miloco.py` — the **Miloco** Mi Home integration (replaces the
   old `miot` plugin). Talks to a local [Xiaomi Miloco](https://github.com/XiaoMi/xiaomi-miloco)
   service (`http://127.0.0.1:1810`, endpoints under `/api`, configurable in
