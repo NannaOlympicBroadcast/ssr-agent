@@ -9,18 +9,26 @@ the tools to runtime context (settings, retriever, memory).
 from __future__ import annotations
 
 import locale
+import os
 import subprocess
 from pathlib import Path
 
 from ..config import Settings
 from ..context_pool.retrieval import Retriever
 from ..permissions import PermissionManager, PermissionResult
-from ..approval import TUIApprovalHandler, ApprovalDecision
+from ..approval import AutoApprovalHandler, TUIApprovalHandler, ApprovalDecision
 from .memory import MemoryStore
 
 _MAX_OUTPUT = 12_000
 _MAX_READ = 60_000
 _MAX_FILE_SEND = 16 * 1024 * 1024  # cap a single file transfer at ~16 MB (ws max_size)
+
+
+def _auto_approve_enabled() -> bool:
+    """Whether SSR_AUTO_APPROVE asks the toolkit to allow every command."""
+    return os.environ.get("SSR_AUTO_APPROVE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 def decode_output(data: bytes | None) -> str:
@@ -75,7 +83,14 @@ class ToolKit:
         from .async_terminal import AsyncTerminal
         self.terminal = AsyncTerminal()
         self.permission_manager = PermissionManager(settings)
-        self.approval_handler = TUIApprovalHandler()
+        # SSR_AUTO_APPROVE lets a headless entry point (e.g. the whole `ssr arm`
+        # command group — see cmd_arm) run every command without an approval
+        # prompt, the same way the xiaomi speaker channel does. Default off, so the
+        # interactive TUI still asks.
+        if _auto_approve_enabled():
+            self.approval_handler = AutoApprovalHandler()
+        else:
+            self.approval_handler = TUIApprovalHandler()
         self.approval_handler.toolkit = self
         self._arm_tools = None  # lazily-built robotics ArmTools (needs agent bus)
 

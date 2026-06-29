@@ -805,7 +805,15 @@ def cmd_arm(args, settings: Settings, console: Console) -> int:
     running and connected to the same bus server — see
     openarm_isaac_lab/scripts/ssr_bridge.
     """
+    import os
+
     from .robotics import demo
+
+    # The whole `ssr arm` command group drives the agent headlessly (no interactive
+    # approval UX), so allow every command without prompting — set before any agent
+    # is constructed so the ToolKit picks an AutoApprovalHandler. Covers every arm
+    # subcommand, present and future.
+    os.environ["SSR_AUTO_APPROVE"] = "1"
 
     if args.arm_action != "do":
         console.print("[red]unknown arm action[/red]")

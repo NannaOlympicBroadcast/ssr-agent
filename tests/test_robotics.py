@@ -170,3 +170,23 @@ def test_await_completion_suspends_when_step_not_yet_done():
 
     assert "END YOUR TURN" in msg
     assert len(handlers) == 1 and handlers[0][0][0] == P.PATTERN_COMPLETED
+
+
+def test_toolkit_auto_approves_under_env_flag(tmp_path, monkeypatch):
+    # `ssr arm` sets SSR_AUTO_APPROVE so every command runs without a prompt; the
+    # interactive default must stay the prompting TUI handler.
+    from ssr.agent.tools import ToolKit
+    from ssr.approval import AutoApprovalHandler, TUIApprovalHandler
+    from ssr.config import Settings
+
+    settings = Settings(home=tmp_path / "home", project_dir=tmp_path / "proj")
+    settings.ensure_dirs()
+
+    monkeypatch.delenv("SSR_AUTO_APPROVE", raising=False)
+    tk = ToolKit(settings, retriever=None, memory=None)
+    assert isinstance(tk.approval_handler, TUIApprovalHandler)
+
+    for val in ("1", "true", "on", "YES"):
+        monkeypatch.setenv("SSR_AUTO_APPROVE", val)
+        tk_auto = ToolKit(settings, retriever=None, memory=None)
+        assert isinstance(tk_auto.approval_handler, AutoApprovalHandler), val
