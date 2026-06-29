@@ -38,12 +38,25 @@ def run_instruction(settings, instruction: str, bus_url: str | None = None,
     agent.toolkit.approval_handler = AutoApprovalHandler()
     url = _bridge_to_bus(agent, bus_url)
     done = {"ok": False, "summary": ""}
+    # `timeout` is an *idle* timeout, not a hard wall: any robot activity (a step
+    # completing, a fresh scene snapshot) pushes the deadline out. A task that keeps
+    # making progress therefore never times out — only one that goes silent for the
+    # full window does. Combined with arm_await_completion's watchdog (which revives
+    # a stalled session, producing activity), this stops "still times out" on long
+    # multi-step instructions.
+    last_activity = [time.time()]
+
+    def _bump(ev):
+        last_activity[0] = time.time()
 
     def _on_success(ev):
         done["ok"] = True
         done["summary"] = (ev.payload or {}).get("summary", "")
 
     agent.bus.subscribe(P.TOPIC_TASK_SUCCESS, _on_success)
+    agent.bus.subscribe(P.TOPIC_ACTION_COMPLETED, _bump)
+    agent.bus.subscribe(P.TOPIC_GRASP_COMPLETED, _bump)
+    agent.bus.subscribe(P.TOPIC_STATE, _bump)
 
     prompt = (
         f"用户指令：{instruction}\n\n"
@@ -63,13 +76,13 @@ def run_instruction(settings, instruction: str, bus_url: str | None = None,
     if console:
         console.print(f"[bold]Agent:[/bold] {reply}\n[dim]session suspended; awaiting bus callbacks…[/dim]")
 
-    deadline = time.time() + timeout
-    while time.time() < deadline and not done["ok"]:
+    while not done["ok"] and (time.time() - last_activity[0]) < timeout:
         time.sleep(0.5)
     agent.close()
     if console:
         if done["ok"]:
             console.print(f"[green]✓ instruction complete[/green] {done['summary']}")
         else:
-            console.print("[yellow]instruction not confirmed complete within timeout[/yellow]")
+            console.print(f"[yellow]instruction not confirmed complete — "
+                          f"no robot activity for {timeout:.0f}s[/yellow]")
     return 0 if done["ok"] else 1
