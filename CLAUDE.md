@@ -37,8 +37,16 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   *handler agent* that fires a fresh turn on every matching event — `type`
   once/every, `inherit_session` to continue the current conversation or run an
   isolated sub-agent; never blocks, so no missed-on-timeout events),
-  `bus_remove_handler`, `bus_listeners`, `bus_history`. `push_notification` can
-  target the `xiaomi` speaker (voice-only TTS). REPL `/bus`, CLI
+  `bus_remove_handler`, `bus_listeners`, `bus_history`. A handler runs one of **4
+  action kinds**: `subagent` (fire an agent turn — the classic handler), `mcp_tool`
+  (call an active MCP tool directly), `shell` (run a terminal command, with the
+  event in `SSR_EVENT_TOPIC`/`SSR_EVENT_SOURCE`/`SSR_EVENT_PAYLOAD`), and `python`
+  (exec a snippet with `event`/`payload`/`agent`/`bus` + `mcp()`/`shell()` helpers).
+  The non-`subagent` kinds run their side effect directly (no LLM turn). The agent
+  creates them via `bus_create_handler` (subagent), `bus_create_mcp_handler`,
+  `bus_create_shell_handler`, `bus_create_python_handler`; plugins can declare the
+  same handlers in their manifest (`handlers`). `push_notification` can target the
+  `xiaomi` speaker (voice-only TTS). REPL `/bus`, CLI
   `ssr bus <serve|send|listen|status>` (all accept `--api-key`).
 - `ssr/srdb/` — the **agent debug server**. Every main-agent process opens one
   `SrdbServer` (a TCP server speaking newline-delimited JSON-RPC 2.0 on an
@@ -57,10 +65,18 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   <agents|call|eval|send|watch> <tcp-link> …`. Bind is `127.0.0.1` only; disable
   with `SSR_SRDB=0`, override `SSR_SRDB_HOST`/`_PORT`/`_KEY`.
 - `ssr/plugins.py` + `ssr/builtin_plugins/` — bundled *plugins* (Claude-Code
-  `.claude-plugin/plugin.json` + `.mcp.json` format) that contribute MCP servers,
-  merged with `~/.ssr/mcp.json`. Ships `chrome-devtools`; supports shared
+  `.claude-plugin/plugin.json` + `.mcp.json` format). A plugin can contribute three
+  things: **MCP servers** (`mcpServers` / `.mcp.json`), **in-process agent tools**
+  (`"agent_tools": ["pkg.module:ClassName", …]` — a class built with the ToolKit
+  exposing `callables()`), and **bus event handlers** (`"handlers": [{event, kind,
+  …}]`, kind ∈ subagent/mcp_tool/shell/python — registered on agent startup).
+  Enable/disable from the CLI (`ssr plugin list|enable|disable|info`), recorded in
+  `~/.ssr/plugins.json`; MCP servers also merge with `~/.ssr/mcp.json`. Shared
   credentials via `${namespace.key}` → `~/.ssr/<namespace>.json` (e.g. the `miot`
-  plugin shares the `xiaomi` channel's credentials).
+  plugin shares the `xiaomi` channel's credentials). Ships `chrome-devtools`,
+  `miot`, and `openarm` (the OpenArm/Isaac-Lab arm-control tools — `arm_*` — which
+  used to be the removed `ssr arm` command; they are now just an agent-tools plugin
+  driven from any session over the bus).
 - `ssr/channels/` — IM/voice channels: `feishu`, `wechat`, and `xiaomi` (XiaoAI
   speaker: polls the Mi cloud **conversation-history API** for speech and replies
   via TTS — pausing playback first, and using the MiIO `play-text` action where
@@ -132,6 +148,8 @@ needs the key; `srdb.eval` is full in-process Python, so it's debug-only.
 - `ssr index [category]` / `/index` — rebuild the embedding index
 - `ssr --experimental-acp` — ACP server over stdio
 - `ssr task create <name> "<prompt>" --cron "*/30 * * * *"` — pm2 task
+- `ssr plugin list` / `ssr plugin enable <name>` / `ssr plugin disable <name>` /
+  `ssr plugin info <name>` — manage plugins (MCP servers, agent tools, bus handlers)
 - `ssr feishu configure` — set up the Lark bot
 - `ssr channel config xiaomi` / `ssr channel on xiaomi` — XiaoAI speaker channel
 - `ssr bus serve` — run a remote bus server; `ssr bus send <topic> '<json>'` /

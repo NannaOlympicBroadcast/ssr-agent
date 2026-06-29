@@ -92,7 +92,6 @@ class ToolKit:
         else:
             self.approval_handler = TUIApprovalHandler()
         self.approval_handler.toolkit = self
-        self._arm_tools = None  # lazily-built robotics ArmTools (needs agent bus)
 
 
     # -------------------------------------------------------------- approvals
@@ -474,6 +473,84 @@ class ToolKit:
             f"Remove it with bus_remove_handler('{hid}')."
         )
 
+    def bus_create_mcp_handler(self, event: str, tool: str, args_json: str = "",
+                               type: str = "every") -> str:
+        """Register a bus handler that CALLS AN MCP TOOL on each matching event.
+
+        No LLM turn runs — the active MCP tool is invoked directly. Use this to wire
+        an event straight to a tool (e.g. turn on a light when a sensor fires).
+
+        Args:
+            event: Topic pattern to match (e.g. 'sensor.motion', 'task.*').
+            tool: Qualified MCP tool name, exactly as advertised: 'mcp__<server>__<tool>'.
+            args_json: JSON object of the tool's arguments (static).
+            type: 'every' or 'once'.
+        """
+        import json
+        agent = getattr(self, "agent_instance", None)
+        if agent is None or not hasattr(agent, "create_bus_handler"):
+            return "ERROR: bus not available in this context"
+        try:
+            args = json.loads(args_json) if args_json.strip() else {}
+            if not isinstance(args, dict):
+                return "ERROR: args_json must be a JSON object"
+        except json.JSONDecodeError as e:
+            return f"ERROR: args_json is not valid JSON: {e}"
+        once = str(type).strip().lower() in ("once", "one", "oneshot", "one-shot", "1")
+        hid = agent.create_bus_handler(
+            event, once=once, description=f"mcp_tool {tool}",
+            action={"kind": "mcp_tool", "tool": tool, "args": args},
+        )
+        return (f"Created mcp_tool handler {hid} on '{event}' -> {tool} "
+                f"({'once' if once else 'every match'}).")
+
+    def bus_create_shell_handler(self, event: str, command: str,
+                                 type: str = "every") -> str:
+        """Register a bus handler that RUNS A SHELL COMMAND on each matching event.
+
+        No LLM turn runs. The event is exposed to the command via the env vars
+        SSR_EVENT_TOPIC, SSR_EVENT_SOURCE and SSR_EVENT_PAYLOAD (JSON).
+
+        Args:
+            event: Topic pattern to match.
+            command: Shell command line to execute.
+            type: 'every' or 'once'.
+        """
+        agent = getattr(self, "agent_instance", None)
+        if agent is None or not hasattr(agent, "create_bus_handler"):
+            return "ERROR: bus not available in this context"
+        once = str(type).strip().lower() in ("once", "one", "oneshot", "one-shot", "1")
+        hid = agent.create_bus_handler(
+            event, once=once, description=f"shell {command[:40]}",
+            action={"kind": "shell", "command": command},
+        )
+        return (f"Created shell handler {hid} on '{event}' "
+                f"({'once' if once else 'every match'}).")
+
+    def bus_create_python_handler(self, event: str, code: str,
+                                  type: str = "every") -> str:
+        """Register a bus handler that EXECUTES A PYTHON SNIPPET on each matching event.
+
+        No LLM turn runs. The snippet runs with these names in scope: event, topic,
+        source, payload (the event payload dict), agent, bus, settings, and helpers
+        mcp(tool, **args) and shell(cmd).
+
+        Args:
+            event: Topic pattern to match.
+            code: Python source to exec on each matching event.
+            type: 'every' or 'once'.
+        """
+        agent = getattr(self, "agent_instance", None)
+        if agent is None or not hasattr(agent, "create_bus_handler"):
+            return "ERROR: bus not available in this context"
+        once = str(type).strip().lower() in ("once", "one", "oneshot", "one-shot", "1")
+        hid = agent.create_bus_handler(
+            event, once=once, description="python handler",
+            action={"kind": "python", "code": code},
+        )
+        return (f"Created python handler {hid} on '{event}' "
+                f"({'once' if once else 'every match'}).")
+
     def bus_remove_handler(self, handler_id: str) -> str:
         """Destroy a bus handler created by bus_create_handler.
 
@@ -495,8 +572,8 @@ class ToolKit:
             return "(no active bus handlers)"
         return "\n".join(
             f"- {h['id']}  pattern='{h.get('pattern')}'  "
-            f"{'once' if h.get('once') else 'every'}  "
-            f"{'session' if h.get('inherit_session') else 'isolated'}"
+            f"kind={h.get('kind', 'subagent')}  "
+            f"{'once' if h.get('once') else 'every'}"
             for h in handlers
         )
 
@@ -529,14 +606,33 @@ class ToolKit:
         counts = self.retriever.reindex(cats)
         return "Reindexed: " + ", ".join(f"{k}={v}" for k, v in counts.items())
 
-    # ----------------------------------------------------------------- arm
-    def arm_tools(self):
-        """Return (building once) the robotics :class:`ArmTools` bound to self."""
-        if self._arm_tools is None:
-            from ..robotics.tools import ArmTools
+    # --------------------------------------------------------- plugin tools
+    def _plugin_tool_callables(self) -> list:
+        """In-process agent tools contributed by enabled plugins.
 
-            self._arm_tools = ArmTools(self)
-        return self._arm_tools
+        A plugin declares ``"agent_tools": ["pkg.module:ClassName", ...]`` in its
+        manifest; each class is constructed with this ToolKit and must expose a
+        ``callables()`` returning its tool functions. This is how e.g. the bundled
+        ``openarm`` plugin contributes the arm-control tools without the core
+        hardcoding them. Failures are skipped so one bad plugin can't break tools.
+        """
+        import importlib
+
+        from .. import plugins
+
+        out: list = []
+        try:
+            specs = plugins.plugin_agent_tools(self.settings)
+        except Exception:
+            return out
+        for spec in specs:
+            try:
+                mod_name, _, attr = spec.partition(":")
+                obj = getattr(importlib.import_module(mod_name), attr)
+                out.extend(obj(self).callables())
+            except Exception:
+                continue
+        return out
 
     # ------------------------------------------------------------- collection
     def callables(self) -> list:
@@ -561,10 +657,13 @@ class ToolKit:
             self.send_file_to_user,
             self.bus_publish,
             self.bus_create_handler,
+            self.bus_create_mcp_handler,
+            self.bus_create_shell_handler,
+            self.bus_create_python_handler,
             self.bus_remove_handler,
             self.bus_listeners,
             self.bus_history,
-            *self.arm_tools().callables(),
+            *self._plugin_tool_callables(),
         ]
 
     def specs(self) -> list[dict]:

@@ -797,35 +797,50 @@ def cmd_serve(args, settings: Settings, console: Console) -> int:
     return 0
 
 
-def cmd_arm(args, settings: Settings, console: Console) -> int:
-    """Drive the real OpenArm/Isaac bridge by natural language over the bus.
+def cmd_plugin(args, settings: Settings, console: Console) -> int:
+    """List / enable / disable plugins (MCP servers, in-process agent tools, bus
+    handlers). Enabled state is recorded in ``~/.ssr/plugins.json``."""
+    from . import plugins
 
-    The agent discovers the arm's advertised skills (arm_describe) and plans the
-    instruction itself. The environment side (the Isaac Lab bridge) must be
-    running and connected to the same bus server — see
-    openarm_isaac_lab/scripts/ssr_bridge.
-    """
-    import os
-
-    from .robotics import demo
-
-    # The whole `ssr arm` command group drives the agent headlessly (no interactive
-    # approval UX), so allow every command without prompting — set before any agent
-    # is constructed so the ToolKit picks an AutoApprovalHandler. Covers every arm
-    # subcommand, present and future.
-    os.environ["SSR_AUTO_APPROVE"] = "1"
-
-    if args.arm_action != "do":
-        console.print("[red]unknown arm action[/red]")
-        return 2
-
-    if "GEMINI_API_KEY" in missing_required(settings):
-        console.print("[red]GEMINI_API_KEY not set — configure ~/.ssr/.env[/red]")
+    action = getattr(args, "plugin_action", None)
+    if action == "list":
+        rows = plugins.list_plugins(settings)
+        if not rows:
+            console.print("[yellow]No plugins found.[/yellow] Run `ssr init` to install bundled ones.")
+            return 0
+        for p in rows:
+            status = "[green]enabled[/green]" if p["enabled"] else "[dim]disabled[/dim]"
+            extras = []
+            if p["mcp_servers"]:
+                extras.append(f"mcp={','.join(p['mcp_servers'])}")
+            if p["agent_tools"]:
+                extras.append(f"tools={len(p['agent_tools'])}")
+            if p["handlers"]:
+                extras.append(f"handlers={len(p['handlers'])}")
+            tail = f"  [dim]({'; '.join(extras)})[/dim]" if extras else ""
+            console.print(f"{status}  [bold]{p['name']}[/bold] {p['version']}{tail}")
+            if p["description"]:
+                console.print(f"    [dim]{p['description'][:120]}[/dim]")
+        return 0
+    if action in ("enable", "disable"):
+        names = {p["name"] for p in plugins.list_plugins(settings)}
+        if args.name not in names:
+            console.print(f"[red]No such plugin '{args.name}'.[/red] See `ssr plugin list`.")
+            return 1
+        plugins.set_plugin_enabled(settings, args.name, action == "enable")
+        console.print(f"[green]Plugin '{args.name}' {action}d.[/green] "
+                      "Restart the agent for it to take effect.")
+        return 0
+    if action == "info":
+        for p in plugins.list_plugins(settings):
+            if p["name"] == args.name:
+                import json as _json
+                console.print(_json.dumps(p, ensure_ascii=False, indent=2))
+                return 0
+        console.print(f"[red]No such plugin '{args.name}'.[/red]")
         return 1
-    console.print(f"[bold]OpenArm — executing instruction:[/bold] {args.instruction}")
-    return demo.run_instruction(settings, instruction=args.instruction,
-                                bus_url=args.bus_url, timeout=args.timeout,
-                                console=console)
+    console.print("[red]unknown plugin action[/red]")
+    return 2
 
 
 class WindowsStdinReader:
@@ -1134,14 +1149,15 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="host to bind the server to")
     serve.add_argument("--port", type=int, default=8000, help="port to bind the server to")
 
-    arm = sub.add_parser("arm", help="drive an Isaac Lab / OpenArm robot by natural language over the bus")
-    asub = arm.add_subparsers(dest="arm_action", required=True)
-    ado = asub.add_parser("do", help="carry out a natural-language instruction with the arm")
-    ado.add_argument("instruction", help='e.g. "帮我把苹果放到橘子上"')
-    ado.add_argument("--bus-url", default=None,
-                     help="ws:// bus server the Isaac bridge connects to "
-                          "(defaults to settings.bus_url / the embedded server)")
-    ado.add_argument("--timeout", type=float, default=180.0, help="seconds to wait")
+    plugin = sub.add_parser("plugin", help="list / enable / disable plugins (MCP servers, agent tools, bus handlers)")
+    plsub = plugin.add_subparsers(dest="plugin_action", required=True)
+    plsub.add_parser("list", help="list discoverable plugins and their status")
+    plen = plsub.add_parser("enable", help="enable a plugin")
+    plen.add_argument("name")
+    pldis = plsub.add_parser("disable", help="disable a plugin")
+    pldis.add_argument("name")
+    plinfo = plsub.add_parser("info", help="show a plugin's manifest details")
+    plinfo.add_argument("name")
 
     bus = sub.add_parser("bus", help="run / talk to the async event bus (JSON-RPC over WebSocket)")
     bsub = bus.add_subparsers(dest="bus_action", required=True)
@@ -1279,8 +1295,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_models(args, settings, console)
     if args.command == "serve":
         return cmd_serve(args, settings, console)
-    if args.command == "arm":
-        return cmd_arm(args, settings, console)
+    if args.command == "plugin":
+        return cmd_plugin(args, settings, console)
     if args.command == "bus":
         return cmd_bus(args, settings, console)
     if args.command == "srdb":
