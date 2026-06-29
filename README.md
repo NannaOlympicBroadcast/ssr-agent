@@ -45,6 +45,13 @@ ssr
    a cross-platform **system service** (systemd / launchd / Windows scheduled
    task) for always-on messaging channels, and a `Dockerfile` /
    `docker-compose.yml` provide a containerised deployment.
+8. **Extensible via plugins** — a plugin can contribute **MCP servers**,
+   **in-process agent tools** (`agent_tools`), and **declarative bus event
+   handlers** (`handlers`), all toggleable from the CLI (`ssr plugin
+   list|enable|disable|info`). Bundles `chrome-devtools`, `openarm` (robot-arm
+   control) and `miloco` (Xiaomi Mi Home). Bus handlers come in four kinds —
+   subagent, MCP-tool call, shell command, and python snippet — so events wire to
+   actions with or without an LLM turn.
 
 ## Install
 
@@ -80,6 +87,15 @@ ssr channel config xiaomi          # configure Xiaomi speaker channel (XiaoAI sp
 ssr channel login xiaomi --browser # open a real Chrome, log in, auto-harvest the token via DevTools (handles Mi safety verification)
 ssr channel login xiaomi --pass-token <PT> --user-id <UID>  # or import passToken+userId from a logged-in browser (i.mi.com cookies)
 ssr channel on xiaomi              # start listening on Xiaomi speaker channel (polls cloud conversation history; replies via TTS, pausing playback first so the reply is audible)
+
+# Plugins (MCP servers, in-process agent tools, bus handlers)
+ssr plugin list          # list plugins + status (chrome-devtools, openarm, miloco, …)
+ssr plugin disable miloco  # turn a plugin's tools/handlers off (enable to re-add)
+
+# Mi Home (Xiaomi Miloco) integration
+ssr miloco status        # is the local Miloco service reachable / Mi account bound?
+ssr miloco sync          # snapshot the home (devices/family/events) into context
+ssr miloco bridge        # stream home activities onto the bus
 
 # Multi-Model configurations
 ssr models config        # interactively configure LLM models (Gemini, Anthropic, OpenAI)
@@ -259,16 +275,37 @@ between agents, tasks, and external programs. Events are **structured** and trav
 over **JSON-RPC 2.0**; topics are dotted names with wildcards (`*` = one segment,
 `**` = the rest, e.g. `task.*`, `agent.**`).
 
+**Bus event handlers — 4 action kinds.** A handler reacts to each matching event
+by running one of four actions, so wiring an event to a side effect no longer
+always needs an LLM turn:
+- **`subagent`** — fire a fresh agent turn following a prompt (the classic
+  handler; `inherit_session=true` continues this conversation, `false` runs an
+  isolated sub-agent).
+- **`mcp_tool`** — call an active MCP tool directly (no LLM turn).
+- **`shell`** — run a terminal command (the event is exposed via the
+  `SSR_EVENT_TOPIC` / `SSR_EVENT_SOURCE` / `SSR_EVENT_PAYLOAD` env vars).
+- **`python`** — exec a code snippet with `event` / `topic` / `source` /
+  `payload` / `agent` / `bus` and `mcp(tool, **args)` / `shell(cmd)` helpers in
+  scope.
+
+The non-`subagent` kinds run their side effect directly on a daemon thread. This
+replaces blocking — handlers never freeze the main loop and never miss an event on
+a timeout. (To wait for one event, register a handler and end the turn; the event
+starts a new turn, and the user can `/stop` to abort.)
+
 **Agent tools** (the model can call these):
 - `bus_publish(topic, payload_json)` — emit an event to communicate.
 - `bus_create_handler(event, handler_prompt, type, inherit_session)` — register a
-  **bus event handler agent**: each matching event fires a fresh agent turn that
-  follows `handler_prompt`. `type` is `every`/`once`; `inherit_session=true`
-  continues the current conversation, `false` runs an isolated sub-agent. This
-  replaces blocking — it never freezes the main loop and never misses an event on
-  a timeout. (If you must wait for one event, register a handler and end the turn;
-  the event starts a new turn, and the user can `/stop` to abort.)
+  **subagent** handler (fires an agent turn per matching event).
+- `bus_create_mcp_handler(event, tool, args_json, type)` — handler that calls an
+  MCP tool.
+- `bus_create_shell_handler(event, command, type)` — handler that runs a shell
+  command.
+- `bus_create_python_handler(event, code, type)` — handler that execs python.
 - `bus_remove_handler(handler_id)`, `bus_listeners()`, `bus_history(pattern)`.
+
+Plugins can also declare handlers of any kind in their manifest (`handlers`), so
+an event → action wiring can ship purely as config (see **Plugins** below).
 
 **Embedded server (on by default).** Every `ssr` main process starts a
 **non-blocking** bus server (so external scripts / other agents can connect) and
@@ -334,19 +371,49 @@ Example `hooks.json` format:
 
 ### Plugins Mechanism
 
-Automatically discovers and loads Claude-Code/Codex-style plugins (which have `.claude-plugin/plugin.json` or `.codex-plugin/plugin.json` manifests) from global `~/.ssr/plugins` and project-level `.ssr/plugins` directories.
+Plugins are discovered from `~/.ssr/plugins` (bundled ones are installed there on
+`ssr init`) and the repo's `ssr/builtin_plugins/`. A plugin (Claude-Code
+`.claude-plugin/plugin.json` manifest) can contribute **three** kinds of things:
 
-*   **Skill Integration**: Loaded manifests are registered into the skill context pool under the `ContextCategory.SKILLS` category with metadata `{"kind": "plugin"}`.
-*   **Dynamic MCP Registration**: Plugins can define MCP servers either inline in `plugin.json` (under the `mcpServers` key) or in a separate `.mcp.json` or `mcp.json` file in the plugin's root directory. The agent automatically loads these configurations when initialized.
-*   **Path Resolution**: To support portable installations, path placeholders like `${__dirname}`, `__dirname`, and `${CLAUDE_PLUGIN_ROOT}` in the plugin's MCP server configuration are resolved to the absolute path of the plugin root directory at runtime.
+*   **MCP servers** — inline in `plugin.json` (`mcpServers` key) or a sibling
+    `.mcp.json`, merged with `~/.ssr/mcp.json`. Path placeholders (`${__dirname}`)
+    and shared credentials (`${namespace.key}` → `~/.ssr/<namespace>.json`) are
+    resolved at runtime.
+*   **In-process agent tools** — `"agent_tools": ["pkg.module:ClassName", …]`,
+    where the class is constructed with the ToolKit and exposes `callables()`.
+    This is how `openarm` and `miloco` ship their tools without the core
+    hardcoding them.
+*   **Bus event handlers** — `"handlers": [{event, kind, …}]` (kind ∈
+    `subagent` / `mcp_tool` / `shell` / `python`), registered on agent startup, so
+    a plugin can wire a custom event → action declaratively.
+
+Enable/disable plugins from the CLI; the state is recorded in `~/.ssr/plugins.json`:
+
+```bash
+ssr plugin list                 # all plugins + enabled/disabled + what each contributes
+ssr plugin enable <name>
+ssr plugin disable <name>
+ssr plugin info <name>
+```
+
+(Separately, plugin **manifests** are also surfaced into the `skills` context-pool
+category as `{"kind": "plugin"}` knowledge items.)
 
 ### Built-in Plugins
 
-*   **`chrome-devtools`**: Wraps [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) for browser automation, debugging and performance analysis.
+*   **`chrome-devtools`** — wraps [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)
+    for browser automation, debugging and performance analysis (an MCP-server plugin).
+*   **`openarm`** — the OpenArm / Isaac-Lab robot-arm control tools (`arm_*`):
+    capability-driven skills (pick / place / move / raw) driven over the bus with a
+    suspend → completion-handler → wake loop. An `agent_tools` plugin; it replaces
+    the old `ssr arm` command, so the arm is now controllable from any session.
+*   **`miloco`** — the Xiaomi Mi Home tools (`miloco_*`), an `agent_tools` plugin
+    backed by the native **Miloco** integration (see below). Disable with
+    `ssr plugin disable miloco`.
 
 > **Note:** the former `miot` MCP plugin has been **removed**. Xiaomi Mi Home
 > device control, family/identity, home events and automations are now provided
-> by the native **Miloco** integration — see [Mi Home via Miloco](#mi-home-via-miloco) below.
+> by the **Miloco** integration / plugin — see [Mi Home via Miloco](#mi-home-via-miloco) below.
 
 ### Mi Home via Miloco
 
@@ -364,12 +431,13 @@ ssr miloco activities    # recent home events
 ssr miloco bridge        # stream home activities onto the SSR bus (foreground)
 ```
 
-The agent gets tools `miloco_devices`, `miloco_device_control`, `miloco_family`,
-`miloco_activities`, `miloco_automations` and `miloco_sync`. Home **activities**
-become `miloco.activity.<type>` bus events (so a handler agent can react to a
-person arriving, a sensor tripping, a hazard being detected), and a synced
-**snapshot** of devices / family members / events / automations is surfaced as
-persistent context.
+The `miloco_*` tools (`miloco_devices`, `miloco_device_control`, `miloco_family`,
+`miloco_activities`, `miloco_automations`, `miloco_sync`, …) are contributed by the
+bundled **`miloco` plugin** (`ssr plugin disable miloco` to turn them off). Home
+**activities** become `miloco.activity.<type>` bus events (so a handler — of any of
+the 4 kinds — can react to a person arriving, a sensor tripping, a hazard being
+detected), and a synced **snapshot** of devices / family members / events /
+automations is surfaced as persistent context.
 
 > Miloco runs natively on **macOS / Linux only**. On **Windows it must run in
 > Docker** — which is also why the SSR gateway defaults to a Docker backend on
