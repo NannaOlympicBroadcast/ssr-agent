@@ -107,6 +107,30 @@ def cmd_ask(args, settings: Settings, console: Console) -> int:
     agent = SSRAgent(settings)
     reply = agent.run(args.prompt)
     console.print(reply)
+
+    # Async bus workflows (e.g. the openarm suspend -> completion-handler -> wake
+    # loop) keep working only while the process is alive. A one-shot `ssr ask`
+    # would otherwise exit the moment the first turn ends — before any bus reaction
+    # can arrive — so --keep-alive idles here, draining bus events and running woken
+    # handler turns, until there's been no bus activity for the given window.
+    keep_alive = float(getattr(args, "keep_alive", 0.0) or 0.0)
+    if keep_alive > 0:
+        import time
+
+        from .robotics import protocol as armp  # arm.task.success ends the wait early
+
+        last = [time.time()]
+        done = {"ok": False}
+        agent.bus.subscribe("**", lambda ev: last.__setitem__(0, time.time()))
+        agent.bus.subscribe(armp.TOPIC_TASK_SUCCESS, lambda ev: done.__setitem__("ok", True))
+        console.print(f"[dim]keep-alive: awaiting bus activity (idle exit after "
+                      f"{keep_alive:.0f}s)… Ctrl-C to stop[/dim]")
+        try:
+            while not done["ok"] and (time.time() - last[0]) < keep_alive:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+        agent.close()
     return 0
 
 
@@ -1179,6 +1203,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask = sub.add_parser("ask", help="one-shot prompt")
     ask.add_argument("prompt")
     ask.add_argument("--cwd", help="project directory")
+    ask.add_argument("--keep-alive", type=float, default=0.0, metavar="SECONDS",
+                     help="after the turn, stay alive so async bus handlers can fire "
+                          "(e.g. the openarm suspend->complete->wake loop); exit after "
+                          "this many seconds with no bus activity. 0 = exit immediately.")
 
     idx = sub.add_parser("index", help="(re)build the model2vec context index")
     idx.add_argument("category", nargs="?", help="tools|configurations|skills|memory")
