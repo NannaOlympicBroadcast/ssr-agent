@@ -114,8 +114,13 @@ class ArmTools:
             if names and skill not in names:
                 return (f"ERROR: '{skill}' is not advertised. Available skills: "
                         f"{', '.join(n for n in names if n)}")
+        # The "raw" skill's waypoints are advertised under args["actions"] (see
+        # capabilities()'s skills list) but the env reads them off the request's
+        # dedicated `actions` field, not `args` — route them there or the env sees
+        # an empty action list and silently no-ops without ever moving the arm.
+        actions = args.pop("actions", []) if skill == "raw" else []
         req = P.ArmActionRequest(seq_id="", episode=0, command=skill, args=args,
-                                 label=f"{skill} {args}")
+                                 actions=actions, label=f"{skill} {args}")
         seq = ctrl.execute(req)
         return (f"Invoked '{skill}' seq_id={seq} (episode {ctrl.episode}). "
                 "Now call arm_await_completion and END YOUR TURN to suspend.")
@@ -143,7 +148,7 @@ class ArmTools:
         return (f"Sent raw action sequence seq_id={seq} ({len(actions)} steps). "
                 "Now call arm_await_completion and END YOUR TURN to suspend.")
 
-    def arm_await_completion(self, handler_prompt: str = "") -> str:
+    def arm_await_completion(self, handler_prompt: str = "", timeout_s: float = 90.0) -> str:
         """Register a one-shot handler that wakes a new turn when the step finishes.
 
         Core of the asynchronous paradigm: after invoking a skill/action you call
@@ -154,10 +159,24 @@ class ArmTools:
 
         Args:
             handler_prompt: instructions for the woken checker turn (optional).
+            timeout_s: watchdog timeout. If no completion event arrives within this
+                many seconds, a timer wakes a checker turn anyway, so a missed or
+                lost completion event can't strand the session forever.
         """
         agent = getattr(self.toolkit, "agent_instance", None)
         if agent is None or not hasattr(agent, "create_bus_handler"):
             return "ERROR: arm bus not available in this context"
+        # Race guard: a fast (or no-op) step can publish its completion before this
+        # handler is registered. The bus has no replay, so that wake would be lost
+        # and the session would hang until the outer timeout. The controller caches
+        # every completion, so if the step is already done, don't suspend — tell the
+        # agent to judge it right now in this same turn.
+        ctrl = self._controller()
+        if ctrl is not None and ctrl.completion_ready():
+            return ("The robot step already completed before the session could "
+                    "suspend. Do NOT end your turn — call arm_check_result now to "
+                    "judge it, then invoke the next step (and arm_await_completion "
+                    "again) or arm_report_done if the instruction is finished.")
         prompt = handler_prompt or (
             "A robot step just completed. Call arm_check_result (and arm_get_camera "
             "if useful) to judge it against the user's instruction. If it failed, "
@@ -170,8 +189,57 @@ class ArmTools:
             P.PATTERN_COMPLETED, prompt, once=True, inherit_session=True,
             description="arm step checker",
         )
-        return (f"Registered completion handler {hid}. END YOUR TURN now to suspend "
-                "the session; the robot's completion event will wake the checker.")
+        # Re-check after registering: if the completion landed in the tiny window
+        # between the guard above and the subscribe, the handler missed it too —
+        # drop it and have the agent check now rather than wait forever.
+        if ctrl is not None and ctrl.completion_ready():
+            agent.remove_bus_handler(hid)
+            return ("The robot step already completed before the session could "
+                    "suspend. Do NOT end your turn — call arm_check_result now to "
+                    "judge it, then invoke the next step (and arm_await_completion "
+                    "again) or arm_report_done if the instruction is finished.")
+        # Watchdog: if the completion event never arrives (lost/missed wake, or the
+        # robot stalled), wake a checker turn anyway after `timeout_s` so the session
+        # can never be stranded suspended forever.
+        self._start_watchdog(agent, hid, prompt, timeout_s)
+        return (f"Registered completion handler {hid} (watchdog {timeout_s:.0f}s). "
+                "END YOUR TURN now to suspend the session; the robot's completion "
+                "event — or the watchdog — will wake the checker.")
+
+    def _start_watchdog(self, agent, hid: str, prompt: str, timeout_s: float) -> None:
+        """Wake a checker turn if the completion handler ``hid`` hasn't fired within
+        ``timeout_s``. A one-shot bus handler removes itself from
+        ``agent._bus_notify_listeners`` when it fires, so its continued presence
+        there means the completion never arrived and we must wake the agent."""
+        import threading
+        import time as _time
+
+        from ..bus.events import BusEvent
+
+        delay = max(1.0, float(timeout_s))
+
+        def _watch() -> None:
+            _time.sleep(delay)
+            listeners = getattr(agent, "_bus_notify_listeners", {})
+            if hid not in listeners:
+                return  # the real completion already fired the handler — nothing to do
+            agent.remove_bus_handler(hid)
+            wd_prompt = (
+                f"{prompt}\n\n[WATCHDOG] No completion event arrived within "
+                f"{delay:.0f}s. The robot may have finished without notifying, or the "
+                "step may have stalled. Call arm_check_result and arm_get_scene to see "
+                "the current state: if the step actually completed, continue with the "
+                "next step; if it stalled, arm_reset and retry; if you cannot make "
+                "progress, call arm_report_done with what is stuck."
+            )
+            ev = BusEvent(topic="arm.watchdog.timeout", payload={"handler": hid},
+                          source="arm-watchdog")
+            try:
+                agent._run_bus_handler(ev, wd_prompt, True)
+            except Exception:
+                pass
+
+        threading.Thread(target=_watch, daemon=True, name="arm-watchdog").start()
 
     def arm_check_result(self) -> str:
         """Return the latest step result + scene snapshot to judge the step."""

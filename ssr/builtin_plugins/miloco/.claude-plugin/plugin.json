@@ -1,0 +1,6 @@
+{
+  "name": "miloco",
+  "version": "0.1.0",
+  "description": "Xiaomi Miloco (Mi Home) integration. Contributes the miloco_* agent tools in-process (device list/control/status/spec, scenes, cameras, family, activities, automations, tasks, home profile, perception scope, notify, refresh, sync). Talks to a local Miloco service (see ssr.integrations.miloco); the home activity->bus bridge and `ssr miloco` CLI live in that integration. Disable with `ssr plugin disable miloco`.",
+  "agent_tools": ["ssr.agent.tools_miloco:MilocoTools"]
+}

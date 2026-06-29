@@ -105,17 +105,17 @@ def _resolve_placeholders(value, creds_for):
     return value
 
 
-def discover_plugin_manifests(settings: Settings) -> list[tuple[Path, dict]]:
-    """Return ``(plugin_dir, manifest)`` for every bundled + user plugin.
-
-    User plugins (``~/.ssr/plugins``) override bundled ones of the same name.
-    """
+def _iter_plugin_dirs(settings: Settings, include_builtin: bool) -> dict[str, tuple[Path, dict]]:
+    """Map plugin name -> ``(dir, manifest)``. When ``include_builtin`` is True the
+    bundled ``builtin_plugins`` dir is scanned first, so an installed/user copy in
+    ``~/.ssr/plugins`` of the same name overrides it."""
     found: dict[str, tuple[Path, dict]] = {}
-    # Like built-in skills, bundled plugins become active only once installed
-    # into ``~/.ssr/plugins`` (via ``ssr init``); the repo ``builtin_plugins``
-    # dir is only the install *source*, so it is not scanned directly here.
-    root = settings.plugins_dir
-    if root.exists():
+    roots: list[Path] = []
+    if include_builtin and _BUILTIN_DIR.exists():
+        roots.append(_BUILTIN_DIR)
+    if settings.plugins_dir.exists():
+        roots.append(settings.plugins_dir)
+    for root in roots:
         for entry in sorted(root.iterdir()):
             if not entry.is_dir():
                 continue
@@ -128,7 +128,114 @@ def discover_plugin_manifests(settings: Settings) -> list[tuple[Path, dict]]:
                 continue
             name = manifest.get("name") or entry.name
             found[name] = (entry, manifest)
-    return list(found.values())
+    return found
+
+
+def discover_plugin_manifests(settings: Settings) -> list[tuple[Path, dict]]:
+    """Return ``(plugin_dir, manifest)`` for every installed user plugin.
+
+    Bundled plugins that contribute MCP servers become active only once installed
+    into ``~/.ssr/plugins`` (via ``ssr init``); the repo ``builtin_plugins`` dir is
+    the install *source*, so it is not scanned here. (In-process plugin features —
+    agent tools and bus handlers — DO read the builtin dir, see
+    :func:`enabled_plugin_manifests`, so they work without a copy.)
+    """
+    return list(_iter_plugin_dirs(settings, include_builtin=False).values())
+
+
+# --------------------------------------------------------------- plugin config
+def plugin_config_path(settings: Settings) -> Path:
+    return settings.home / "plugins.json"
+
+
+def load_plugin_config(settings: Settings) -> dict:
+    """Load ``~/.ssr/plugins.json`` (``{"disabled": [name, ...]}``)."""
+    path = plugin_config_path(settings)
+    if not path.exists():
+        return {"disabled": []}
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"disabled": []}
+    if not isinstance(data, dict):
+        return {"disabled": []}
+    data.setdefault("disabled", [])
+    return data
+
+
+def save_plugin_config(settings: Settings, cfg: dict) -> None:
+    plugin_config_path(settings).write_text(json.dumps(cfg, indent=2) + "\n", "utf-8")
+
+
+def set_plugin_enabled(settings: Settings, name: str, enabled: bool) -> dict:
+    """Enable/disable a plugin in ``~/.ssr/plugins.json``; returns the new config."""
+    cfg = load_plugin_config(settings)
+    disabled = set(cfg.get("disabled", []))
+    if enabled:
+        disabled.discard(name)
+    else:
+        disabled.add(name)
+    cfg["disabled"] = sorted(disabled)
+    save_plugin_config(settings, cfg)
+    return cfg
+
+
+def _is_enabled(name: str, manifest: dict, cfg: dict) -> bool:
+    if manifest.get("disabled"):
+        return False
+    return name not in set(cfg.get("disabled", []))
+
+
+def enabled_plugin_manifests(settings: Settings,
+                             include_builtin: bool = True) -> list[tuple[str, Path, dict]]:
+    """``(name, dir, manifest)`` for every enabled plugin (manifest ``disabled`` and
+    ``plugins.json`` both respected)."""
+    cfg = load_plugin_config(settings)
+    out = []
+    for name, (plugin_dir, manifest) in _iter_plugin_dirs(settings, include_builtin).items():
+        if _is_enabled(name, manifest, cfg):
+            out.append((name, plugin_dir, manifest))
+    return out
+
+
+def list_plugins(settings: Settings, include_builtin: bool = True) -> list[dict]:
+    """Describe every discoverable plugin (for ``ssr plugin list``)."""
+    cfg = load_plugin_config(settings)
+    res = []
+    for name, (plugin_dir, manifest) in sorted(_iter_plugin_dirs(settings, include_builtin).items()):
+        res.append({
+            "name": name,
+            "enabled": _is_enabled(name, manifest, cfg),
+            "version": manifest.get("version", ""),
+            "description": manifest.get("description", ""),
+            "mcp_servers": list(_plugin_servers(plugin_dir, manifest).keys()),
+            "agent_tools": manifest.get("agent_tools") or manifest.get("agentTools") or [],
+            "handlers": manifest.get("handlers") or manifest.get("busHandlers") or [],
+            "dir": str(plugin_dir),
+        })
+    return res
+
+
+def plugin_agent_tools(settings: Settings) -> list[str]:
+    """``"module:attr"`` agent-tool specs declared by enabled plugins. Each attr is a
+    class constructed with the ToolKit and exposing ``callables()``."""
+    specs: list[str] = []
+    for _name, _dir, manifest in enabled_plugin_manifests(settings):
+        for spec in (manifest.get("agent_tools") or manifest.get("agentTools") or []):
+            if isinstance(spec, str) and spec.strip():
+                specs.append(spec.strip())
+    return specs
+
+
+def plugin_bus_handlers(settings: Settings) -> list[dict]:
+    """Bus-handler declarations from enabled plugins. Each is a dict with at least
+    ``event`` and a ``kind`` (subagent/mcp_tool/shell/python) + that kind's fields."""
+    handlers: list[dict] = []
+    for name, _dir, manifest in enabled_plugin_manifests(settings):
+        for h in (manifest.get("handlers") or manifest.get("busHandlers") or []):
+            if isinstance(h, dict) and h.get("event"):
+                handlers.append({**h, "_plugin": name})
+    return handlers
 
 
 def plugin_mcp_servers(settings: Settings) -> dict[str, dict]:
@@ -144,8 +251,10 @@ def plugin_mcp_servers(settings: Settings) -> dict[str, dict]:
             creds_cache[ns] = load_credentials(settings, ns)
         return creds_cache[ns]
 
+    cfg = load_plugin_config(settings)
     for plugin_dir, manifest in discover_plugin_manifests(settings):
-        if manifest.get("disabled"):
+        name = manifest.get("name") or plugin_dir.name
+        if not _is_enabled(name, manifest, cfg):
             continue
         # Eagerly load the declared credential namespace (if any); other
         # ``${ns.key}`` references are resolved lazily by namespace on demand.

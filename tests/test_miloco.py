@@ -29,6 +29,28 @@ def test_config_roundtrip_and_endpoint_defaults():
         assert again.endpoints["activities"] == ml.DEFAULT_ENDPOINTS["activities"]
 
 
+def test_env_overrides_and_token_discovery(monkeypatch):
+    with tempfile.TemporaryDirectory() as d:
+        s = _settings(Path(d))
+        # A config file says one base_url...
+        ml.save_config(s, ml.MilocoConfig(base_url="http://file:1810"))
+        # ...but env is authoritative (containerized deploy points at the service).
+        monkeypatch.setenv("MILOCO_BASE_URL", "http://miloco:1810")
+        monkeypatch.setenv("MILOCO_TOKEN", "tok-123")
+        cfg = ml.load_config(s)
+        assert cfg.base_url == "http://miloco:1810"
+        assert cfg.api_key == "tok-123"
+
+        # Token auto-discovery from a shared Miloco config.json (server.token).
+        monkeypatch.delenv("MILOCO_TOKEN", raising=False)
+        monkeypatch.delenv("MILOCO_API_KEY", raising=False)
+        mlc_cfg = Path(d) / "miloco-config.json"
+        mlc_cfg.write_text(json.dumps({"server": {"token": "auto-tok"}}), "utf-8")
+        monkeypatch.setenv("MILOCO_CONFIG_FILE", str(mlc_cfg))
+        cfg2 = ml.load_config(s)
+        assert cfg2.api_key == "auto-tok"
+
+
 def test_normal_response_envelope_unwrapping():
     f = ml.MilocoClient._as_list
     assert f({"code": 0, "data": {"events": [{"id": 1}]}}) == [{"id": 1}]
@@ -84,6 +106,26 @@ def test_bridge_dedup_and_publish():
         assert bridge2.poll_once() == 0
 
 
+def test_sse_event_handling_and_dedup():
+    with tempfile.TemporaryDirectory() as d:
+        s = _settings(Path(d))
+        published = []
+        bridge = ml.MilocoActivityBridge(s, lambda t, p: published.append((t, p)))
+        # A bare event record frame.
+        bridge._handle_sse_event("new_event", json.dumps(
+            {"id": "e1", "type": "person.arrived", "timestamp": 1000}))
+        # A wrapped frame ({"event": {...}}).
+        bridge._handle_sse_event("new_event", json.dumps(
+            {"event": {"id": "e2", "type": "hazard.smoke", "timestamp": 2000}}))
+        # Duplicate id → ignored.
+        bridge._handle_sse_event("new_event", json.dumps({"id": "e1", "type": "x"}))
+        # Non-event frame → ignored.
+        bridge._handle_sse_event("ping", "{}")
+        topics = [t for t, _ in published]
+        assert topics == ["miloco.activity.person_arrived", "miloco.activity.hazard_smoke"]
+        assert "events_stream" in ml.DEFAULT_ENDPOINTS
+
+
 def test_snapshot_and_context_loader():
     from ssr.context_pool.loaders import load_miloco_context
 
@@ -107,12 +149,81 @@ def test_snapshot_and_context_loader():
         assert all(i.metadata.get("kind") == "miloco" for i in items)
 
 
-def test_miloco_tools_registered_in_toolkit():
-    # The miloco tools must be exposed to the model.
+def test_miloco_tools_exposed_via_plugin():
+    # Mi Home control is now the bundled `miloco` plugin (agent_tools ->
+    # MilocoTools), not hardcoded on ToolKit — but the tools must still reach the
+    # model through ToolKit.callables().
     from ssr.agent.tools import ToolKit
+    from ssr.agent.tools_miloco import MilocoTools
 
     expected = {
         "miloco_status", "miloco_devices", "miloco_device_control",
-        "miloco_family", "miloco_activities", "miloco_automations", "miloco_sync",
+        "miloco_device_status", "miloco_device_spec", "miloco_trigger_scene",
+        "miloco_cameras", "miloco_family", "miloco_activities",
+        "miloco_automations", "miloco_tasks", "miloco_home_profile",
+        "miloco_scope", "miloco_notify", "miloco_refresh", "miloco_sync",
     }
-    assert expected <= set(dir(ToolKit))
+    # MilocoTools advertises exactly these.
+    assert {fn.__name__ for fn in MilocoTools(None).callables()} == expected
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        settings = Settings(home=Path(tmpdir) / "home", project_dir=Path(tmpdir) / "proj")
+        settings.ensure_dirs()
+        tk = ToolKit(settings, retriever=None, memory=None)
+        names = {fn.__name__ for fn in tk.callables()}
+        # ...and they arrive in the toolkit via the enabled miloco plugin.
+        assert expected <= names
+        # disabling the plugin removes them
+        from ssr import plugins
+        plugins.set_plugin_enabled(settings, "miloco", False)
+        names_off = {fn.__name__ for fn in ToolKit(settings, retriever=None, memory=None).callables()}
+        assert not (expected & names_off)
+
+
+def test_miloco_builtin_plugin_manifest():
+    from ssr import plugins
+    with tempfile.TemporaryDirectory() as tmpdir:
+        settings = Settings(home=Path(tmpdir) / "home", project_dir=Path(tmpdir) / "proj")
+        settings.ensure_dirs()
+        rows = {p["name"]: p for p in plugins.list_plugins(settings)}
+        assert "miloco" in rows
+        assert rows["miloco"]["agent_tools"] == ["ssr.agent.tools_miloco:MilocoTools"]
+
+
+def test_miloco_skills_bundled():
+    # The Miloco capability skills are bundled as the agent's knowledge base.
+    from pathlib import Path
+    import ssr
+
+    skills_root = Path(ssr.__file__).resolve().parent / "builtin_skills"
+    bundled = {p.parent.name for p in skills_root.glob("miloco*/SKILL.md")}
+    # A representative spread across Miloco's capability areas + our adapter.
+    for name in ("miloco-overview", "miloco-devices", "miloco-notify",
+                 "miloco-home-profile", "miloco-miot-scope", "miloco-create-task"):
+        assert name in bundled, name
+
+
+def test_control_payload_normalization():
+    from ssr.agent.tools_miloco import _normalize_control
+
+    # Shorthand siid/piid → set_property with prop.{siid}.{piid} iid.
+    assert _normalize_control({"siid": 2, "piid": 1, "value": True}) == {
+        "type": "set_property", "iid": "prop.2.1", "value": True}
+    # Shorthand siid/aiid → call_action.
+    assert _normalize_control({"siid": 5, "aiid": 1, "params": ["hi"]}) == {
+        "type": "call_action", "iid": "action.5.1", "params": ["hi"]}
+    # iid+value shorthand.
+    assert _normalize_control({"iid": "prop.2.1", "value": 3})["type"] == "set_property"
+    # Already a full request → unchanged.
+    full = {"type": "set_properties", "properties": [{"iid": "prop.2.1", "value": 1}]}
+    assert _normalize_control(full) == full
+
+
+def test_new_endpoints_present():
+    eps = ml.DEFAULT_ENDPOINTS
+    for name in ("device_status", "device_spec", "scene_trigger", "tasks",
+                 "home_profile", "scope_homes", "scope_cameras", "send_notify",
+                 "cameras", "refresh_all"):
+        assert name in eps, name
+    # The non-existent GET /scenes was removed (only POST trigger exists).
+    assert "scenes" not in eps

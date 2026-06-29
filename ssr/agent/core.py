@@ -32,9 +32,11 @@ Operating principles:
 4. Persist durable facts/preferences with `remember`.
 5. Use `web_search` (Tavily) for up-to-date external information.
 6. Delegate self-contained subtasks to `spawn_sub_agent`.
-7. Coordinate asynchronously over the event bus: `bus_publish` to emit events,
-   and `bus_create_handler` to register a handler agent that reacts each time a
-   matching event arrives (instead of blocking). Don't block waiting on events.
+7. Coordinate asynchronously over the event bus: `bus_publish` to emit events, and
+   register a handler that reacts each time a matching event arrives (instead of
+   blocking). A handler can run an agent turn (`bus_create_handler`) or, with no LLM
+   turn, call an MCP tool (`bus_create_mcp_handler`), run a shell command
+   (`bus_create_shell_handler`) or exec python (`bus_create_python_handler`).
 Be concise. Show your reasoning through the plan and tool calls, not verbosity.
 """
 
@@ -121,6 +123,45 @@ class SSRAgent:
                 self._bus_bridge = RemoteBusBridge(self.bus, url, api_key=api_key).start()
             except Exception as e:  # never let bus setup break the agent
                 self._emit("warning", text=f"Bus: could not connect to {url}: {e}")
+        self._register_plugin_handlers()
+
+    def _register_plugin_handlers(self) -> None:
+        """Register bus handlers declared by enabled plugins (manifest ``handlers``).
+
+        Each declaration is ``{event, kind, ...}`` with the same shape the agent's
+        bus_create_* tools build, so plugins can wire events -> subagent/mcp_tool/
+        shell/python actions purely in config."""
+        try:
+            from .. import plugins
+
+            decls = plugins.plugin_bus_handlers(self.settings)
+        except Exception:
+            return
+        for h in decls:
+            try:
+                event = h.get("event")
+                kind = h.get("kind", "subagent")
+                once = str(h.get("type", "every")).strip().lower() in (
+                    "once", "one", "oneshot", "one-shot", "1")
+                if kind == "subagent":
+                    action = {"kind": "subagent", "prompt": h.get("prompt", ""),
+                              "inherit_session": bool(h.get("inherit_session", False))}
+                elif kind == "mcp_tool":
+                    action = {"kind": "mcp_tool", "tool": h.get("tool", ""),
+                              "args": h.get("args") if isinstance(h.get("args"), dict) else {}}
+                elif kind == "shell":
+                    action = {"kind": "shell", "command": h.get("command", "")}
+                elif kind == "python":
+                    action = {"kind": "python", "code": h.get("code", "")}
+                else:
+                    continue
+                self.create_bus_handler(
+                    event, once=once,
+                    description=f"plugin:{h.get('_plugin', '?')} {kind}",
+                    action=action,
+                )
+            except Exception:
+                continue
 
     def connect_bus(self, url: str) -> str:
         """Bridge the built-in bus to a remote bus server at ``url``."""
@@ -145,38 +186,53 @@ class SSRAgent:
         once: bool = False,
         inherit_session: bool = True,
         description: str = "",
+        action: dict | None = None,
     ) -> str:
-        """Register a *bus event handler agent*.
+        """Register a *bus event handler*: each event matching ``pattern`` triggers
+        an ``action``.
 
-        Each event whose topic matches ``pattern`` fires a fresh agent turn that
-        follows ``handler_prompt`` (plus the event details). This replaces the
-        old blocking ``bus_wait``: it never blocks the main loop and never misses
-        an event on timeout, and the same event source can trigger the agent any
-        number of times.
+        Four action kinds are supported (the ``action`` dict's ``kind`` field):
 
-        * ``once``            — fire once, then auto-remove the handler.
-        * ``inherit_session`` — True runs in the current conversation (continues
-          its context); False runs an isolated sub-agent.
+        * ``subagent`` — run an agent turn following a prompt (the classic handler;
+          ``inherit_session`` continues this conversation, else an isolated
+          sub-agent). This is also the default when ``action`` is omitted, built
+          from ``handler_prompt``/``inherit_session`` for backwards compatibility.
+        * ``mcp_tool`` — call an active MCP tool: ``{"tool": "mcp__srv__name",
+          "args": {...}}``. No LLM turn.
+        * ``shell``    — run a terminal command: ``{"command": "..."}``. The event
+          is exposed via ``SSR_EVENT_TOPIC`` / ``SSR_EVENT_SOURCE`` /
+          ``SSR_EVENT_PAYLOAD`` (JSON) env vars.
+        * ``python``   — exec a code snippet: ``{"code": "..."}`` with ``event``,
+          ``topic``, ``source``, ``payload``, ``agent``, ``bus`` and helpers
+          ``mcp(tool, **args)`` / ``shell(cmd)`` in scope.
 
-        Returns the handler id (pass it to :meth:`remove_bus_handler`).
+        ``once`` fires a single time then auto-removes. Returns the handler id.
         """
+        if action is None:
+            action = {"kind": "subagent", "prompt": handler_prompt,
+                      "inherit_session": bool(inherit_session)}
+        kind = action.get("kind", "subagent")
+
         def _on_event(event):
             # For one-shot handlers, drop the listener *before* running so a fast
             # follow-up event can't double-fire it.
             if once:
                 self.bus.unsubscribe(listener_id)
                 self._bus_notify_listeners.pop(listener_id, None)
-            self._run_bus_handler(event, handler_prompt, inherit_session)
+            self._dispatch_bus_action(event, action)
 
         listener_id = self.bus.subscribe(
-            pattern, _on_event, description=description or (handler_prompt[:60] or "bus handler")
+            pattern, _on_event,
+            description=description or (handler_prompt[:60] or f"{kind} handler"),
         )
         self._bus_notify_listeners[listener_id] = {
             "pattern": pattern,
+            "kind": kind,
             "prompt": handler_prompt,
             "once": bool(once),
             "inherit_session": bool(inherit_session),
             "description": description,
+            "action": action,
         }
         return listener_id
 
@@ -186,8 +242,70 @@ class SSRAgent:
         return self.bus.unsubscribe(handler_id)
 
     def bus_handlers(self) -> list[dict]:
-        """Active bus handlers (id + pattern/once/inherit metadata)."""
+        """Active bus handlers (id + pattern/kind/once/inherit metadata)."""
         return [{"id": hid, **meta} for hid, meta in self._bus_notify_listeners.items()]
+
+    def _dispatch_bus_action(self, event, action: dict) -> None:
+        """Route a fired handler to its action kind. ``subagent`` runs an LLM turn;
+        the other kinds run their side effect on a daemon thread (never blocking the
+        bus-callback thread)."""
+        import threading as _threading
+
+        kind = (action or {}).get("kind", "subagent")
+        if kind == "subagent":
+            self._run_bus_handler(event, action.get("prompt", ""),
+                                  bool(action.get("inherit_session", True)))
+            return
+        _threading.Thread(target=self._run_action_handler, args=(event, action),
+                          daemon=True).start()
+
+    def _run_action_handler(self, event, action: dict) -> None:
+        """Execute a non-LLM handler action (mcp_tool / shell / python)."""
+        import json as _json
+        import os as _os
+        import subprocess as _subprocess
+        import traceback as _traceback
+
+        kind = action.get("kind", "")
+        self._emit("bus_event", tag="ssr", topic=event.topic, source=event.source)
+        try:
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if kind == "mcp_tool":
+                tool = action.get("tool", "")
+                args = action.get("args") if isinstance(action.get("args"), dict) else {}
+                result = self.mcp_manager.call_tool(tool, args)
+                self._emit("thinking", tag="ssr",
+                           text=f"[bus handler ▸ mcp_tool {tool}] {str(result)[:500]}")
+            elif kind == "shell":
+                command = action.get("command", "")
+                env = {**_os.environ,
+                       "SSR_EVENT_TOPIC": event.topic,
+                       "SSR_EVENT_SOURCE": event.source or "",
+                       "SSR_EVENT_PAYLOAD": _json.dumps(payload, ensure_ascii=False)}
+                proc = _subprocess.run(command, shell=True, capture_output=True,
+                                       timeout=float(action.get("timeout", 120)),
+                                       cwd=str(self.settings.project_dir), env=env)
+                from .tools import decode_output
+                out = decode_output(proc.stdout) + decode_output(proc.stderr)
+                self._emit("thinking", tag="ssr",
+                           text=f"[bus handler ▸ shell] exit={proc.returncode} {out[:500]}")
+            elif kind == "python":
+                code = action.get("code", "")
+                ns = {
+                    "event": event, "topic": event.topic, "source": event.source,
+                    "payload": payload, "agent": self, "bus": self.bus,
+                    "settings": self.settings,
+                    "mcp": lambda tool, **kw: self.mcp_manager.call_tool(tool, kw),
+                    "shell": lambda cmd: self.toolkit.run_command(cmd),
+                }
+                exec(code, ns)
+                self._emit("thinking", tag="ssr", text="[bus handler ▸ python] ok")
+            else:
+                self._emit("thinking", tag="ssr",
+                           text=f"[bus handler] unknown action kind '{kind}'")
+        except Exception:
+            self._emit("thinking", tag="ssr",
+                       text=f"[bus handler ▸ {kind}] error:\n{_traceback.format_exc()}")
 
     def _run_bus_handler(self, event, handler_prompt: str, inherit_session: bool) -> None:
         """Fire an agent turn for a matching bus event (handler callback)."""

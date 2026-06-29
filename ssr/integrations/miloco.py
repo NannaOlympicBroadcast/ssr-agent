@@ -57,14 +57,26 @@ DEFAULT_BASE_URL = "http://127.0.0.1:1810"
 DEFAULT_ENDPOINTS: dict[str, str] = {
     "health": "/health",                               # GET, unauthenticated probe
     "bind_status": "/api/miot/status",                 # GET, Mi account bind state
+    "user_info": "/api/miot/user_info",                # GET, Mi account user info
     "devices": "/api/miot/device_list",                # GET, Mi Home devices
     "device_control": "/api/miot/devices/{did}/control",  # POST, control a device
     "device_status": "/api/miot/devices/{did}/status",    # GET, current properties
+    "device_spec": "/api/miot/devices/{did}/spec",        # GET, device MIoT spec
+    "device_history": "/api/miot/device_history",         # GET, recent per-device history
     "homes": "/api/miot/home",                         # GET, homes/rooms
-    "scenes": "/api/miot/scenes",                       # GET, Mi Home scenes
+    "cameras": "/api/miot/camera_list",                # GET, Mi Home cameras
+    "scene_trigger": "/api/miot/scenes/{scene_id}/trigger",  # POST, run a manual scene
     "members": "/api/identity/persons",                # GET, recognised family persons
     "activities": "/api/events",                       # GET, meaningful home events
+    "events_stream": "/api/events/stream",             # GET, SSE stream of new events
     "automations": "/api/rules",                       # GET, Miloco automation rules
+    "tasks": "/api/tasks",                             # GET, persistent home tasks
+    "home_profile": "/api/home-profile/rendered",      # GET, rendered home memory/profile
+    "home_profile_entries": "/api/home-profile/entries",  # GET, home-profile entries
+    "scope_homes": "/api/miot/scope/homes",            # GET, perception scope: homes
+    "scope_cameras": "/api/miot/scope/cameras",        # GET, perception scope: cameras
+    "send_notify": "/api/miot/send_notify",            # POST, proactive notification
+    "refresh_all": "/api/miot/refresh_miot_all_info",  # POST, refresh device caches
 }
 
 
@@ -75,7 +87,8 @@ class MilocoConfig:
     base_url: str = DEFAULT_BASE_URL
     api_key: str = ""              # optional bearer token for the Miloco API
     timeout: float = 10.0
-    poll_interval: float = 5.0     # activity-bridge poll cadence (seconds)
+    use_sse: bool = True           # stream events via SSE (real-time); poll as fallback
+    poll_interval: float = 5.0     # activity-bridge poll cadence / SSE retry backoff (seconds)
     activity_limit: int = 50       # max activities fetched per poll
     home_id: str = ""              # optional: restrict to one home
     bus_topic_prefix: str = "miloco.activity"
@@ -111,22 +124,62 @@ def _bridge_state_path(settings: Settings) -> Path:
     return data_dir(settings) / "bridge-state.json"
 
 
+def _token_from_miloco_config() -> str:
+    """Read Miloco's auto-generated ``server.token`` from a shared config file.
+
+    Miloco generates a Bearer token on first boot and writes it to
+    ``$MILOCO_HOME/config.json`` (nested ``server.token``). When that file is
+    mounted into the SSR container (compose shares the ``miloco-data`` volume),
+    point ``MILOCO_CONFIG_FILE`` at it and SSR picks up the token automatically —
+    no manual copy needed. ``MILOCO_HOME`` is honoured as a fallback location.
+    """
+    candidates = []
+    if os.environ.get("MILOCO_CONFIG_FILE"):
+        candidates.append(Path(os.environ["MILOCO_CONFIG_FILE"]))
+    if os.environ.get("MILOCO_HOME"):
+        candidates.append(Path(os.environ["MILOCO_HOME"]) / "config.json")
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        server = data.get("server") if isinstance(data, dict) else None
+        if isinstance(server, dict) and server.get("token"):
+            return str(server["token"])
+    return ""
+
+
 def load_config(settings: Settings) -> MilocoConfig:
+    """Load the Miloco config, with environment variables taking precedence.
+
+    Precedence (high → low): ``MILOCO_*`` env vars > ``~/.ssr/miloco.json`` >
+    code defaults. Env wins so a containerized deployment can point SSR at the
+    ``miloco`` service (``MILOCO_BASE_URL``) and supply the Bearer token
+    (``MILOCO_API_KEY`` / ``MILOCO_TOKEN``, or auto-discovered from a shared
+    Miloco ``config.json``) without editing the file inside the volume.
+    """
     p = config_path(settings)
-    if not p.exists():
-        # Environment overrides let a Docker deployment configure Miloco without
-        # writing a file into the volume.
-        env_url = os.environ.get("MILOCO_BASE_URL")
-        cfg = MilocoConfig()
-        if env_url:
-            cfg.base_url = env_url
-        if os.environ.get("MILOCO_API_KEY"):
-            cfg.api_key = os.environ["MILOCO_API_KEY"]
-        return cfg
-    try:
-        return MilocoConfig.from_dict(json.loads(p.read_text("utf-8")))
-    except (OSError, json.JSONDecodeError):
-        return MilocoConfig()
+    cfg = MilocoConfig()
+    if p.exists():
+        try:
+            cfg = MilocoConfig.from_dict(json.loads(p.read_text("utf-8")))
+        except (OSError, json.JSONDecodeError):
+            cfg = MilocoConfig()
+
+    # Environment overrides the file (authoritative for Docker/Compose deploys).
+    env_url = os.environ.get("MILOCO_BASE_URL")
+    if env_url:
+        cfg.base_url = env_url
+    env_key = os.environ.get("MILOCO_API_KEY") or os.environ.get("MILOCO_TOKEN")
+    if env_key:
+        cfg.api_key = env_key
+
+    # Last resort: read Miloco's auto-generated service token from a shared config.
+    if not cfg.api_key:
+        tok = _token_from_miloco_config()
+        if tok:
+            cfg.api_key = tok
+    return cfg
 
 
 def save_config(settings: Settings, cfg: MilocoConfig) -> Path:
@@ -271,6 +324,32 @@ class MilocoClient:
         """True if the Miloco service answers its ``/health`` probe."""
         return bool(self._request("GET", "health", raw=True))
 
+    def authed_ok(self) -> bool | None:
+        """Whether an *authenticated* endpoint accepts our token.
+
+        Returns True (token accepted / auth disabled), False (401/403 — wrong or
+        missing Bearer token), or None (Miloco unreachable). Used to tell a
+        connectivity failure apart from an auth failure when syncing.
+        """
+        import httpx
+
+        try:
+            r = httpx.get(self._url("bind_status"), headers=self._headers(), timeout=self.cfg.timeout)
+        except Exception:
+            return None
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code < 400
+
+    def probe(self) -> dict:
+        """A one-shot diagnostic snapshot for ``ssr miloco status``."""
+        return {
+            "base_url": self.cfg.base_url,
+            "has_token": bool(self.cfg.api_key),
+            "health": self.health(),
+            "authed": self.authed_ok(),
+        }
+
     def bind_status(self) -> dict | None:
         """Mi-account bind status (``data`` of ``/api/miot/status``)."""
         body = self._request("GET", "bind_status")
@@ -282,14 +361,55 @@ class MilocoClient:
     def homes(self) -> list[dict]:
         return self._as_list(self._request("GET", "homes"))
 
-    def scenes(self) -> list[dict]:
-        return self._as_list(self._request("GET", "scenes"))
+    def cameras(self) -> list[dict]:
+        return self._as_list(self._request("GET", "cameras"))
 
     def members(self) -> list[dict]:
         return self._as_list(self._request("GET", "members"))
 
     def automations(self) -> list[dict]:
         return self._as_list(self._request("GET", "automations"))
+
+    def tasks(self) -> list[dict]:
+        return self._as_list(self._request("GET", "tasks"))
+
+    def device_status(self, did: str) -> dict | None:
+        body = self._request("GET", "device_status", did=did)
+        return body.get("data") if isinstance(body, dict) else body
+
+    def device_spec(self, did: str) -> dict | None:
+        body = self._request("GET", "device_spec", did=did)
+        return body.get("data") if isinstance(body, dict) else body
+
+    def device_history(self) -> dict | list | None:
+        body = self._request("GET", "device_history")
+        return body.get("data") if isinstance(body, dict) else body
+
+    def trigger_scene(self, scene_id: str) -> dict | None:
+        return self._request("POST", "scene_trigger", scene_id=scene_id)
+
+    def home_profile(self) -> dict | str | None:
+        """The rendered home memory/profile (preferences, habits, routines)."""
+        body = self._request("GET", "home_profile")
+        return body.get("data") if isinstance(body, dict) else body
+
+    def home_profile_entries(self) -> list[dict]:
+        return self._as_list(self._request("GET", "home_profile_entries"))
+
+    def scope_homes(self) -> list[dict]:
+        return self._as_list(self._request("GET", "scope_homes"))
+
+    def scope_cameras(self) -> list[dict]:
+        return self._as_list(self._request("GET", "scope_cameras"))
+
+    def send_notify(self, notify: str) -> dict | None:
+        """Send a proactive notification via Miloco. ``notify`` is the text body
+        (Miloco's ``SendNotifyRequest.notify`` is a non-empty string)."""
+        return self._request("POST", "send_notify", json_body={"notify": notify})
+
+    def refresh(self) -> dict | None:
+        """Refresh Miloco's device/scene/user caches from the Mi cloud."""
+        return self._request("POST", "refresh_all")
 
     def activities(self, since_ms: int | None = None, limit: int | None = None) -> list[dict]:
         """Recent meaningful home events (``/api/events``).
@@ -325,13 +445,17 @@ PublishFn = Callable[[str, dict], None]
 
 
 class MilocoActivityBridge:
-    """Poll Miloco activities and republish each as an SSR bus event.
+    """Stream Miloco activities and republish each as an SSR bus event.
 
-    ``publish(topic, payload)`` is supplied by the caller so the same bridge
-    works against an in-process :class:`~ssr.bus.core.MessageBus` or a remote
-    :class:`~ssr.bus.client.BusClient`. Events are de-duplicated by activity id
-    (persisted across restarts in ``~/.ssr/miloco/bridge-state.json``) so a
-    restart does not replay the whole backlog.
+    By default it consumes Miloco's **SSE** event stream (``/api/events/stream``)
+    for real-time, low-latency delivery, and falls back to **polling**
+    (``/api/events``) when the stream is unavailable or drops. On every
+    (re)connect it first polls to backfill any gap, so no event is missed across
+    a reconnect. ``publish(topic, payload)`` is supplied by the caller so the
+    same bridge works against an in-process :class:`~ssr.bus.core.MessageBus` or
+    a remote :class:`~ssr.bus.client.BusClient`. Events are de-duplicated by
+    activity id (persisted across restarts in ``~/.ssr/miloco/bridge-state.json``)
+    so neither a reconnect nor a restart replays an event.
     """
 
     def __init__(
@@ -368,7 +492,27 @@ class MilocoActivityBridge:
         except OSError:
             pass
 
-    # -- polling
+    # -- publish one activity (shared by poll + SSE; de-dups and tracks state)
+    def _publish_activity(self, act: dict) -> bool:
+        """Publish one activity if unseen. Returns True if it was published."""
+        if not isinstance(act, dict):
+            return False
+        aid = _activity_id(act)
+        if aid in self._seen:
+            return False
+        self._seen.add(aid)
+        ts = float(act.get("timestamp") or act.get("time") or 0.0) or time.time() * 1000
+        self._last_ts = max(self._last_ts, ts)
+        topic = f"{self.cfg.bus_topic_prefix}.{_activity_type(act)}"
+        try:
+            self._publish(topic, {"activity": act, "activity_id": aid, "ts": ts})
+        except Exception:
+            logger.exception("publishing miloco activity %s failed", aid)
+            return False
+        self._save_state()
+        return True
+
+    # -- polling (catch-up + fallback)
     def poll_once(self) -> int:
         """Fetch activities and publish any not seen before. Returns new count.
 
@@ -377,39 +521,92 @@ class MilocoActivityBridge:
         new tail rather than the whole backlog.
         """
         acts = self.client.activities(since_ms=int(self._last_ts) or None)
-        published = 0
-        for act in acts:
-            aid = _activity_id(act)
-            if aid in self._seen:
-                continue
-            self._seen.add(aid)
-            ts = float(act.get("timestamp") or act.get("time") or 0.0) or time.time() * 1000
-            self._last_ts = max(self._last_ts, ts)
-            topic = f"{self.cfg.bus_topic_prefix}.{_activity_type(act)}"
-            payload = {"activity": act, "activity_id": aid, "ts": ts}
-            try:
-                self._publish(topic, payload)
-                published += 1
-            except Exception:
-                logger.exception("publishing miloco activity %s failed", aid)
+        published = sum(1 for act in acts if self._publish_activity(act))
         if published:
-            self._save_state()
             logger.info("miloco bridge published %d new activity event(s)", published)
         return published
 
+    # -- SSE (real-time)
+    def _stream_once(self) -> bool:
+        """Consume the SSE event stream until it drops. Returns whether it
+        connected at all (False ⇒ SSE unavailable, caller should poll/fallback)."""
+        import httpx
+
+        url = self.client._url("events_stream")
+        headers = self.client._headers()
+        headers["Accept"] = "text/event-stream"
+        # EventSource semantics: also pass the token as a query param, since some
+        # SSE endpoints only accept it that way.
+        params = {"token": self.cfg.api_key} if self.cfg.api_key else None
+        # No read timeout: the stream is long-lived (heartbeats keep it warm).
+        timeout = httpx.Timeout(self.cfg.timeout, read=None)
+        try:
+            with httpx.stream("GET", url, params=params, headers=headers, timeout=timeout) as r:
+                if r.status_code >= 400:
+                    logger.debug("miloco SSE %s -> HTTP %s", url, r.status_code)
+                    return False
+                logger.info("miloco SSE connected: %s", url)
+                event_name: str | None = None
+                data_lines: list[str] = []
+                for line in r.iter_lines():
+                    if self._stop.is_set():
+                        return True
+                    line = (line or "").rstrip("\r")
+                    if line == "":                      # blank line dispatches the event
+                        if data_lines:
+                            self._handle_sse_event(event_name, "\n".join(data_lines))
+                        event_name, data_lines = None, []
+                    elif line.startswith(":"):           # comment / heartbeat ping
+                        continue
+                    elif line.startswith("event:"):
+                        event_name = line[6:].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[5:].lstrip(" "))
+                return True
+        except Exception as e:
+            logger.debug("miloco SSE connection error: %s", e)
+            return False
+
+    def _handle_sse_event(self, event_name: str | None, data_str: str) -> None:
+        if event_name not in (None, "new_event", "message", "event"):
+            return  # ignore non-event frames (e.g. keep-alive markers)
+        try:
+            data = json.loads(data_str)
+        except (json.JSONDecodeError, TypeError):
+            return
+        # The frame may be the event record itself, or wrap it under a key.
+        act = data
+        if isinstance(data, dict):
+            for key in ("event", "activity", "data"):
+                if isinstance(data.get(key), dict):
+                    act = data[key]
+                    break
+        self._publish_activity(act)
+
     def run_forever(self) -> None:
+        mode = "SSE+poll" if self.cfg.use_sse else "poll"
         logger.info(
-            "miloco activity bridge polling %s every %.1fs (topic prefix %s.*)",
-            self.cfg.base_url, self.cfg.poll_interval, self.cfg.bus_topic_prefix,
+            "miloco activity bridge (%s) on %s (topic prefix %s.*, retry %.1fs)",
+            mode, self.cfg.base_url, self.cfg.bus_topic_prefix, self.cfg.poll_interval,
         )
         while not self._stop.is_set():
             try:
+                # Backfill any gap (idempotent via since + de-dup) before/instead
+                # of streaming, so a reconnect never drops events.
                 self.poll_once()
             except MilocoUnavailable:
                 raise
             except Exception:
                 logger.exception("miloco bridge poll error (continuing)")
-            self._stop.wait(self.cfg.poll_interval)
+            if self._stop.is_set():
+                break
+            if self.cfg.use_sse:
+                # Stream live until it drops; on drop, loop back to catch-up poll.
+                connected = self._stream_once()
+                if not connected:
+                    self._stop.wait(self.cfg.poll_interval)  # SSE down → poll cadence
+            else:
+                self._stop.wait(self.cfg.poll_interval)
 
     def start(self) -> "MilocoActivityBridge":
         """Start polling in a daemon thread (non-blocking)."""
@@ -500,15 +697,33 @@ def sync_snapshot(settings: Settings, cfg: MilocoConfig | None = None) -> dict:
     except MilocoUnavailable as e:
         snap["error"] = str(e)
         return snap
+
+    # Diagnose reachability/auth up front so the error is actionable.
+    if not client.health():
+        snap["error"] = (
+            f"无法连接 Miloco（{cfg.base_url}）。请确认 Miloco 已启动，且该地址从当前进程可达"
+            "（容器内应指向服务名，如 http://miloco:1810，可用 MILOCO_BASE_URL 覆盖）。"
+        )
+        return snap
+    if client.authed_ok() is False:
+        snap["error"] = (
+            f"Miloco 已连接（{cfg.base_url}）但鉴权失败（401）。Miloco 首次启动会生成 "
+            "server.token，请把它配置给 SSR：设置 MILOCO_API_KEY/MILOCO_TOKEN，或让 "
+            "MILOCO_CONFIG_FILE 指向 Miloco 的 config.json 以自动读取。"
+        )
+        return snap
+
     snap["homes"] = client.homes()
     snap["devices"] = client.devices()
+    snap["cameras"] = client.cameras()
     snap["members"] = client.members()
     snap["automations"] = client.automations()
+    snap["tasks"] = client.tasks()
     snap["activities"] = client.activities(limit=cfg.activity_limit)
-    if not client.health() and not any(
-        snap.get(k) for k in ("homes", "devices", "members", "automations", "activities")
-    ):
-        snap["error"] = f"Miloco 未响应（{cfg.base_url}）。请确认 Miloco 服务已启动。"
+    snap["scope_homes"] = client.scope_homes()
+    snap["scope_cameras"] = client.scope_cameras()
+    # The rendered home memory (preferences/habits/routines) — a key context item.
+    snap["home_profile"] = client.home_profile()
     try:
         snapshot_path(settings).write_text(
             json.dumps(snap, ensure_ascii=False, indent=2), "utf-8"

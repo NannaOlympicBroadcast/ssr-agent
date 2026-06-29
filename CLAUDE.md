@@ -37,8 +37,16 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   *handler agent* that fires a fresh turn on every matching event — `type`
   once/every, `inherit_session` to continue the current conversation or run an
   isolated sub-agent; never blocks, so no missed-on-timeout events),
-  `bus_remove_handler`, `bus_listeners`, `bus_history`. `push_notification` can
-  target the `xiaomi` speaker (voice-only TTS). REPL `/bus`, CLI
+  `bus_remove_handler`, `bus_listeners`, `bus_history`. A handler runs one of **4
+  action kinds**: `subagent` (fire an agent turn — the classic handler), `mcp_tool`
+  (call an active MCP tool directly), `shell` (run a terminal command, with the
+  event in `SSR_EVENT_TOPIC`/`SSR_EVENT_SOURCE`/`SSR_EVENT_PAYLOAD`), and `python`
+  (exec a snippet with `event`/`payload`/`agent`/`bus` + `mcp()`/`shell()` helpers).
+  The non-`subagent` kinds run their side effect directly (no LLM turn). The agent
+  creates them via `bus_create_handler` (subagent), `bus_create_mcp_handler`,
+  `bus_create_shell_handler`, `bus_create_python_handler`; plugins can declare the
+  same handlers in their manifest (`handlers`). `push_notification` can target the
+  `xiaomi` speaker (voice-only TTS). REPL `/bus`, CLI
   `ssr bus <serve|send|listen|status>` (all accept `--api-key`).
 - `ssr/srdb/` — the **agent debug server**. Every main-agent process opens one
   `SrdbServer` (a TCP server speaking newline-delimited JSON-RPC 2.0 on an
@@ -57,20 +65,38 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   <agents|call|eval|send|watch> <tcp-link> …`. Bind is `127.0.0.1` only; disable
   with `SSR_SRDB=0`, override `SSR_SRDB_HOST`/`_PORT`/`_KEY`.
 - `ssr/plugins.py` + `ssr/builtin_plugins/` — bundled *plugins* (Claude-Code
-  `.claude-plugin/plugin.json` + `.mcp.json` format) that contribute MCP servers,
-  merged with `~/.ssr/mcp.json`. Ships `chrome-devtools`; supports shared
-  credentials via `${namespace.key}` → `~/.ssr/<namespace>.json`. (The former
-  `miot` plugin has been **removed** — Mi Home control now lives in the native
-  `miloco` integration below.)
+  `.claude-plugin/plugin.json` + `.mcp.json` format). A plugin can contribute three
+  things: **MCP servers** (`mcpServers` / `.mcp.json`), **in-process agent tools**
+  (`"agent_tools": ["pkg.module:ClassName", …]` — a class built with the ToolKit
+  exposing `callables()`), and **bus event handlers** (`"handlers": [{event, kind,
+  …}]`, kind ∈ subagent/mcp_tool/shell/python — registered on agent startup).
+  Enable/disable from the CLI (`ssr plugin list|enable|disable|info`), recorded in
+  `~/.ssr/plugins.json`; MCP servers also merge with `~/.ssr/mcp.json`. Shared
+  credentials via `${namespace.key}` → `~/.ssr/<namespace>.json` (e.g. a plugin can
+  reference `${xiaomi.account}` to reuse the `xiaomi` channel's credentials). Ships
+  `chrome-devtools`, `openarm` (the OpenArm/Isaac-Lab arm-control `arm_*` tools —
+  formerly the removed `ssr arm` command), and `miloco` (the Mi Home `miloco_*`
+  tools, see below) — both `openarm` and `miloco` contribute their tools in-process
+  via `agent_tools` and are toggleable with `ssr plugin disable <name>`. (The former
+  `miot` plugin was **removed** — Mi Home control now lives in the `miloco`
+  integration below.)
 - `ssr/integrations/miloco.py` — the **Miloco** Mi Home integration (replaces the
   old `miot` plugin). Talks to a local [Xiaomi Miloco](https://github.com/XiaoMi/xiaomi-miloco)
   service (`http://127.0.0.1:1810`, endpoints under `/api`, configurable in
-  `~/.ssr/miloco.json`). Provides: agent tools (`miloco_devices`,
-  `miloco_device_control`, `miloco_family`, `miloco_activities`,
-  `miloco_automations`, `miloco_sync`); a **bus event source**
-  (`MilocoActivityBridge` polls Miloco activities and republishes each as a
-  `miloco.activity.<type>` event, de-duped, so handler agents react to what
-  happens at home); and a **persistent context** snapshot
+  `~/.ssr/miloco.json`; `MILOCO_*` env vars override the file and can
+  auto-discover Miloco's `server.token` via `MILOCO_CONFIG_FILE`). Provides: a
+  broad set of agent tools (`miloco_status`, `miloco_devices`,
+  `miloco_device_control`/`_status`/`_spec`, `miloco_trigger_scene`,
+  `miloco_cameras`, `miloco_family`, `miloco_activities`, `miloco_automations`,
+  `miloco_tasks`, `miloco_home_profile`, `miloco_scope`, `miloco_notify`,
+  `miloco_refresh`, `miloco_sync`); Miloco's official capability **skills**
+  (`plugins/skills`) are bundled into `ssr/builtin_skills/miloco-*` as the
+  agent's knowledge base (plus a `miloco-overview` adapter mapping them to the
+  `miloco_*` tools); a **bus event source**
+  (`MilocoActivityBridge` streams Miloco activities over **SSE**
+  (`/api/events/stream`, polling fallback + reconnect backfill) and republishes
+  each as a `miloco.activity.<type>` event, de-duped, so handler agents react in
+  real time to what happens at home); and a **persistent context** snapshot
   (`ssr miloco sync` → `~/.ssr/miloco/snapshot.json`, surfaced as REFS items by
   `load_miloco_context`). CLI: `ssr miloco <config|status|sync|devices|family|
   activities|automations|bridge>`. Miloco runs natively on macOS/Linux only; on
@@ -150,6 +176,8 @@ needs the key; `srdb.eval` is full in-process Python, so it's debug-only.
 - `ssr index [category]` / `/index` — rebuild the embedding index
 - `ssr --experimental-acp` — ACP server over stdio
 - `ssr task create <name> "<prompt>" --cron "*/30 * * * *"` — pm2 task
+- `ssr plugin list` / `ssr plugin enable <name>` / `ssr plugin disable <name>` /
+  `ssr plugin info <name>` — manage plugins (MCP servers, agent tools, bus handlers)
 - `ssr feishu configure` — set up the Lark bot
 - `ssr channel config xiaomi` / `ssr channel on xiaomi` — XiaoAI speaker channel
 - `ssr miloco status` / `ssr miloco sync` / `ssr miloco bridge` — Mi Home (Miloco)
