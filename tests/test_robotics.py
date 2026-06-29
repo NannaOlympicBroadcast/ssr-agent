@@ -133,11 +133,25 @@ def test_completion_ready_tracks_pending_seq():
 
 
 def _fake_agent(bus, handlers):
-    return SimpleNamespace(
-        bus=bus, agent_id="t",
-        create_bus_handler=lambda *a, **k: handlers.append((a, k)) or "h1",
-        remove_bus_handler=lambda hid: handlers.append(("removed", hid)) or True,
-    )
+    agent = SimpleNamespace(bus=bus, agent_id="t", _bus_notify_listeners={}, woke=[])
+
+    def _create(*a, **k):
+        handlers.append((a, k))
+        hid = "h%d" % len(handlers)
+        agent._bus_notify_listeners[hid] = {"prompt": a[1] if len(a) > 1 else ""}
+        return hid
+
+    def _remove(hid):
+        agent._bus_notify_listeners.pop(hid, None)
+        return True
+
+    def _run(ev, prompt, inherit):  # mirrors SSRAgent._run_bus_handler signature
+        agent.woke.append((ev.topic, prompt))
+
+    agent.create_bus_handler = _create
+    agent.remove_bus_handler = _remove
+    agent._run_bus_handler = _run
+    return agent
 
 
 def test_await_completion_does_not_suspend_when_step_already_done():
@@ -166,10 +180,46 @@ def test_await_completion_suspends_when_step_not_yet_done():
     tools = ArmTools(SimpleNamespace(agent_instance=agent))
 
     tools.arm_invoke("pick", '{"object": "apple"}')
-    msg = tools.arm_await_completion()  # no completion yet → normal suspend path
+    msg = tools.arm_await_completion(timeout_s=30)  # no completion yet → suspend path
 
     assert "END YOUR TURN" in msg
     assert len(handlers) == 1 and handlers[0][0][0] == P.PATTERN_COMPLETED
+
+
+def test_watchdog_wakes_checker_when_no_completion_arrives():
+    # The safety net: if the completion event is lost/missed, a timer still wakes a
+    # checker turn so the session can't be stranded suspended forever.
+    import time
+
+    bus = MessageBus(name="t", source="t")
+    handlers = []
+    agent = _fake_agent(bus, handlers)
+    tools = ArmTools(SimpleNamespace(agent_instance=agent))
+
+    tools.arm_invoke("pick", '{"object": "apple"}')
+    msg = tools.arm_await_completion(timeout_s=1.0)  # 1.0s is the watchdog floor
+    assert "watchdog" in msg.lower() and len(handlers) == 1
+
+    time.sleep(1.4)  # let the watchdog fire (no completion was published)
+    assert agent.woke and agent.woke[0][0] == "arm.watchdog.timeout"
+    assert not agent._bus_notify_listeners  # watchdog dropped the stale handler
+
+
+def test_watchdog_does_not_double_wake_when_completion_fired():
+    import time
+
+    bus = MessageBus(name="t", source="t")
+    handlers = []
+    agent = _fake_agent(bus, handlers)
+    tools = ArmTools(SimpleNamespace(agent_instance=agent))
+
+    tools.arm_invoke("pick", '{"object": "apple"}')
+    tools.arm_await_completion(timeout_s=1.0)
+    # The real once-handler firing removes itself from the listener registry.
+    agent._bus_notify_listeners.clear()
+
+    time.sleep(1.4)
+    assert agent.woke == []  # watchdog must stay quiet — the completion handled it
 
 
 def test_toolkit_auto_approves_under_env_flag(tmp_path, monkeypatch):

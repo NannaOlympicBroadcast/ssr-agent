@@ -148,7 +148,7 @@ class ArmTools:
         return (f"Sent raw action sequence seq_id={seq} ({len(actions)} steps). "
                 "Now call arm_await_completion and END YOUR TURN to suspend.")
 
-    def arm_await_completion(self, handler_prompt: str = "") -> str:
+    def arm_await_completion(self, handler_prompt: str = "", timeout_s: float = 90.0) -> str:
         """Register a one-shot handler that wakes a new turn when the step finishes.
 
         Core of the asynchronous paradigm: after invoking a skill/action you call
@@ -159,6 +159,9 @@ class ArmTools:
 
         Args:
             handler_prompt: instructions for the woken checker turn (optional).
+            timeout_s: watchdog timeout. If no completion event arrives within this
+                many seconds, a timer wakes a checker turn anyway, so a missed or
+                lost completion event can't strand the session forever.
         """
         agent = getattr(self.toolkit, "agent_instance", None)
         if agent is None or not hasattr(agent, "create_bus_handler"):
@@ -195,8 +198,48 @@ class ArmTools:
                     "suspend. Do NOT end your turn — call arm_check_result now to "
                     "judge it, then invoke the next step (and arm_await_completion "
                     "again) or arm_report_done if the instruction is finished.")
-        return (f"Registered completion handler {hid}. END YOUR TURN now to suspend "
-                "the session; the robot's completion event will wake the checker.")
+        # Watchdog: if the completion event never arrives (lost/missed wake, or the
+        # robot stalled), wake a checker turn anyway after `timeout_s` so the session
+        # can never be stranded suspended forever.
+        self._start_watchdog(agent, hid, prompt, timeout_s)
+        return (f"Registered completion handler {hid} (watchdog {timeout_s:.0f}s). "
+                "END YOUR TURN now to suspend the session; the robot's completion "
+                "event — or the watchdog — will wake the checker.")
+
+    def _start_watchdog(self, agent, hid: str, prompt: str, timeout_s: float) -> None:
+        """Wake a checker turn if the completion handler ``hid`` hasn't fired within
+        ``timeout_s``. A one-shot bus handler removes itself from
+        ``agent._bus_notify_listeners`` when it fires, so its continued presence
+        there means the completion never arrived and we must wake the agent."""
+        import threading
+        import time as _time
+
+        from ..bus.events import BusEvent
+
+        delay = max(1.0, float(timeout_s))
+
+        def _watch() -> None:
+            _time.sleep(delay)
+            listeners = getattr(agent, "_bus_notify_listeners", {})
+            if hid not in listeners:
+                return  # the real completion already fired the handler — nothing to do
+            agent.remove_bus_handler(hid)
+            wd_prompt = (
+                f"{prompt}\n\n[WATCHDOG] No completion event arrived within "
+                f"{delay:.0f}s. The robot may have finished without notifying, or the "
+                "step may have stalled. Call arm_check_result and arm_get_scene to see "
+                "the current state: if the step actually completed, continue with the "
+                "next step; if it stalled, arm_reset and retry; if you cannot make "
+                "progress, call arm_report_done with what is stuck."
+            )
+            ev = BusEvent(topic="arm.watchdog.timeout", payload={"handler": hid},
+                          source="arm-watchdog")
+            try:
+                agent._run_bus_handler(ev, wd_prompt, True)
+            except Exception:
+                pass
+
+        threading.Thread(target=_watch, daemon=True, name="arm-watchdog").start()
 
     def arm_check_result(self) -> str:
         """Return the latest step result + scene snapshot to judge the step."""
