@@ -46,8 +46,10 @@ class ArmTools:
 
         ALWAYS call this first. It returns the robot's capability descriptor —
         the low-level action space and the list of skills you may pass to
-        arm_invoke (with their argument schemas), plus the current objects and
-        camera info. Plan only with skills listed here; do not assume any.
+        arm_invoke (with their argument schemas), plus the current objects,
+        any "obstacles" (collision bodies — table/support AABBs in the robot
+        root frame — to route the arm around) and camera info. Plan only with
+        skills listed here; do not assume any.
         """
         ctrl = self._controller()
         if ctrl is None:
