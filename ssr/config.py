@@ -11,6 +11,7 @@ Required env (configured in ``~/.ssr/.env``):
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,6 +78,12 @@ class Settings:
     bus_host: str = "127.0.0.1"
     bus_port: int = 8765
     bus_api_key: str | None = None  # shared secret required to talk to the bus
+    # Cloud pairing (persist-vault, set by ``ssr login`` via ~/.ssr/cloud.json):
+    # the per-user cloud bus + "Hosted Tools" SSE-MCP + the account token used to
+    # push global memory and pull user preferences.
+    cloud_account_token: str | None = None
+    cloud_api_base: str | None = None
+    hosted_mcp_url: str | None = None
     extra: dict[str, str] = field(default_factory=dict)
 
     # --- derived paths -----------------------------------------------------
@@ -115,6 +122,10 @@ class Settings:
     @property
     def feishu_config(self) -> Path:
         return self.home / "feishu.json"
+
+    @property
+    def cloud_config(self) -> Path:
+        return self.home / "cloud.json"
 
     @property
     def refs_file(self) -> Path:
@@ -191,6 +202,23 @@ def load_settings(project_dir: str | os.PathLike | None = None) -> Settings:
     if settings.gemini_api_key:
         os.environ.setdefault("GOOGLE_API_KEY", settings.gemini_api_key)
         os.environ.setdefault("GEMINI_API_KEY", settings.gemini_api_key)
+
+    # Cloud pairing: if this agent was paired with a persist-vault account
+    # (``ssr login`` wrote ~/.ssr/cloud.json), join the per-user cloud bus and
+    # remember the hosted-tools URL + account token. Explicit env always wins.
+    cloud_path = home / "cloud.json"
+    if cloud_path.exists():
+        try:
+            cloud = json.loads(cloud_path.read_text(encoding="utf-8"))
+        except Exception:
+            cloud = {}
+        settings.cloud_account_token = cloud.get("account_token")
+        settings.cloud_api_base = cloud.get("api_base")
+        settings.hosted_mcp_url = cloud.get("hosted_mcp_url")
+        if not settings.bus_url and cloud.get("bus_url"):
+            settings.bus_url = cloud.get("bus_url")
+        if not settings.bus_api_key and cloud.get("bus_key"):
+            settings.bus_api_key = cloud.get("bus_key")
     return settings
 
 

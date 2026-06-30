@@ -101,6 +101,15 @@ class SSRAgent:
         except Exception:
             pass
 
+        # If this agent is paired with a persist-vault account, start the
+        # global-memory ⇆ cloud-preferences sync (idempotent per process).
+        try:
+            from .memory_sync import maybe_start_memory_sync
+
+            maybe_start_memory_sync(self)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------- bus
     def _init_bus(self) -> None:
         """Create the agent's built-in bus and bridge it to a remote if set."""
@@ -873,12 +882,20 @@ def _start_mcp_manager(settings: Settings) -> MCPManager:
 
 
 def _mcp_tool_spec(tool: MCPTool) -> dict:
-    """Context-pool spec for a single MCP tool (seeds the 'tools' category)."""
+    """Context-pool spec for a single MCP tool (seeds the 'tools' category).
+
+    MCP servers whose name starts with ``hosted`` are the persist-vault cloud
+    integrations attached via ``ssr login`` (or, in the sandbox, the local
+    integrations server); their tools are grouped + labelled **Hosted Tools**.
+    """
+    hosted = str(getattr(tool, "server", "") or "").lower().startswith("hosted")
+    desc = tool.description or f"MCP tool {tool.name}"
     return {
         "name": tool.qualified_name,
-        "description": tool.description or f"MCP tool {tool.name}",
+        "description": ("[Hosted Tools] " + desc) if hosted else desc,
         "origin": "mcp",
         "server": tool.server,
+        "group": "Hosted Tools" if hosted else "mcp",
     }
 
 

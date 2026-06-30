@@ -102,7 +102,19 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   activities|automations|bridge>`. Miloco runs natively on macOS/Linux only; on
   **Windows it must run in Docker** (`ensure_native_supported` raises with that
   guidance, and the gateway defaults to Docker on Windows).
-- `ssr/channels/` — IM/voice channels: `feishu`, `wechat`, and `xiaomi` (XiaoAI
+- **Cloud pairing (persist-vault)** — `ssr login [url]` runs a device-code OAuth
+  flow against a [persist-vault](https://github.com/NannaOlympicBroadcast/persist-vault)
+  site: it opens the approval page, the user pastes back the authorization code,
+  and the returned creds are stored in `~/.ssr/cloud.json`. `load_settings` then
+  joins the per-user **cloud bus** (`bus_url`/`bus_api_key`) and merges the
+  **Hosted Tools** SSE-MCP server into `~/.ssr/mcp.json` (`hosted-integrations`);
+  MCP tools from any `hosted*` server are grouped/labelled **Hosted Tools** in
+  the context pool. `ssr/agent/memory_sync.py` (`maybe_start_memory_sync`, once
+  per process when paired) periodically pushes the **global** `memory.md` digest
+  to the cloud and pulls integrated **user preferences** down into
+  `~/.ssr/profile.md` (a configurations doc), refreshed live via the
+  `memory.preferences` bus event.
+- `ssr/channels/` — IM/voice channels: `feishu`, `wechat`, `xiaomi` (XiaoAI
   speaker: polls the Mi cloud **conversation-history API** for speech and replies
   via TTS — pausing playback first, and using the MiIO `play-text` action where
   MiNA `text_to_speech` silently no-ops; markdown is stripped before TTS and the
@@ -113,7 +125,11 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   log in without re-verification): `--browser` opens a real Chrome and harvests
   the token via the DevTools Protocol; `--pass-token/--user-id` import it from
   browser cookies. Channel slash commands stay in sync with the CLI; channels are
-  not pinned to a default dir.
+  not pinned to a default dir. A `webchat` channel (`webchat_channel.py`) lets a
+  **paired** agent be reached from the persist-vault front-end over the cloud
+  bus: it subscribes to `webchat.in.<session>` events and publishes
+  `thought`/`tool`/`token`/`done` back on the event's `reply_topic` (turns run on
+  a worker thread so publishing never deadlocks the bus client's loop).
 - `ssr/integrations/` — `pm2` background tasks, `feishu` (Lark) bot, `acp`
   (Agent Client Protocol) server, `mcp_client` (spawns the MCP servers in
   `~/.ssr/mcp.json` and speaks JSON-RPC over stdio; tools are exposed to the
@@ -172,6 +188,8 @@ needs the key; `srdb.eval` is full in-process Python, so it's debug-only.
 
 ## Useful commands
 - `ssr` — launch TUI
+- `ssr login [url]` — pair this agent with a persist-vault cloud account (joins
+  the per-user cloud bus + loads Hosted Tools; writes `~/.ssr/cloud.json`)
 - `ssr ask "<prompt>"` — one-shot
 - `ssr index [category]` / `/index` — rebuild the embedding index
 - `ssr --experimental-acp` — ACP server over stdio
