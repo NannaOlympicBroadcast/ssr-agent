@@ -415,7 +415,12 @@ class MCPSSEServer:
     def _read_loop(self) -> None:
         import urllib.parse
         try:
-            with self._client.stream("GET", self.url, params=self.query_params, timeout=None) as response:
+            # NB: httpx replaces (not merges) the URL's own query string whenever a
+            # ``params`` value is passed — even an empty dict. Pass ``None`` when we
+            # have no extra params so a key embedded in the URL (e.g. the Hosted
+            # Tools ``/sse/integrations?key=<mcp_key>``) survives instead of being
+            # stripped, which would make the SSE GET hit the proxy unauthenticated (401).
+            with self._client.stream("GET", self.url, params=self.query_params or None, timeout=None) as response:
                 if response.status_code != 200:
                     _LOGGER.error("mcp-sse[%s] connection failed with status code %s", self.name, response.status_code)
                     self._endpoint_ready.set()

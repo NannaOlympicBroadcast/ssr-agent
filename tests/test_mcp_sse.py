@@ -20,12 +20,14 @@ from ssr.integrations.mcp_client import (
 class SSETestServer(BaseHTTPRequestHandler):
     response_queue = queue.Queue()
     requests_received = []
+    get_paths = []
 
     def log_message(self, format, *args):
         pass  # suppress logging to stderr
 
     def do_GET(self):
         if self.path.startswith("/mcp"):
+            self.get_paths.append(self.path)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -96,6 +98,7 @@ class SSETestServer(BaseHTTPRequestHandler):
 def sse_server():
     SSETestServer.response_queue = queue.Queue()
     SSETestServer.requests_received = []
+    SSETestServer.get_paths = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), SSETestServer)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -138,6 +141,22 @@ def test_sse_client_handshake_and_call(sse_server):
         assert "initialize" in methods_sent
         assert "tools/list" in methods_sent
         assert "tools/call" in methods_sent
+    finally:
+        server.stop()
+
+
+def test_sse_client_preserves_url_query_key(sse_server):
+    # A key embedded in the URL (the Hosted Tools pattern
+    # ``/sse/integrations?key=<mcp_key>``) must reach the server on the GET.
+    # Regression for httpx replacing the URL query whenever ``params`` is passed
+    # (even an empty dict), which stripped the key and produced a 401.
+    server = MCPSSEServer(name="keyed_sse", url=f"{sse_server}/mcp?key=SECRET123")
+    try:
+        server.start()
+        assert SSETestServer.get_paths, "server never received the GET"
+        assert any("key=SECRET123" in p for p in SSETestServer.get_paths), (
+            f"key was stripped from the SSE GET: {SSETestServer.get_paths}"
+        )
     finally:
         server.stop()
 
