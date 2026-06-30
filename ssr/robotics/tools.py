@@ -7,10 +7,16 @@ with ``arm_invoke`` (or sends raw action vectors with ``arm_act``). The brain
 adapts to whatever the robot supports — adding a skill on the robot needs no
 brain change.
 
+The agent is **never handed object positions**: it perceives objects by looking at
+the live camera frame (``arm_get_camera``) and names a target by the image pixel it
+sees there — the robot back-projects that pixel through the camera. There is no
+``get_scene`` that returns coordinates.
+
 Typical flow for an arbitrary instruction:
-``arm_describe`` (learn skills + objects) → ``arm_invoke('pick', {object:'apple'})``
-→ ``arm_await_completion`` then END THE TURN → [woken] ``arm_check_result`` →
-``arm_invoke('place_on', {object:'orange'})`` → … → ``arm_report_done``.
+``arm_describe`` (learn skills) → ``arm_get_camera`` (look) → read the apple's pixel
+off the image → ``arm_invoke('pick', {px:.., py:..})`` → ``arm_await_completion``
+then END THE TURN → [woken] ``arm_check_result`` (+ ``arm_get_camera``) → place it
+→ … → ``arm_report_done``.
 """
 
 from __future__ import annotations
@@ -46,10 +52,12 @@ class ArmTools:
 
         ALWAYS call this first. It returns the robot's capability descriptor —
         the low-level action space and the list of skills you may pass to
-        arm_invoke (with their argument schemas), plus the current objects,
-        any "obstacles" (collision bodies — table/support AABBs in the robot
-        root frame — to route the arm around) and camera info. Plan only with
-        skills listed here; do not assume any.
+        arm_invoke (with their argument schemas), any "obstacles" (collision
+        bodies — table/support AABBs in the robot root frame — to route the arm
+        around) and camera info (width/height for reading pixels). It does NOT
+        list object positions: perceive objects by looking at the camera frame
+        (arm_get_camera) and target them by image pixel. Plan only with skills
+        listed here; do not assume any.
         """
         ctrl = self._controller()
         if ctrl is None:
@@ -67,33 +75,13 @@ class ArmTools:
             return "ERROR: arm bus not available in this context"
         return f"Arm reset ({ctrl.reset()})."
 
-    def arm_get_scene(self) -> str:
-        """Perceive the current scene: object poses, what's held, camera frame."""
-        ctrl = self._controller()
-        if ctrl is None:
-            return "ERROR: arm bus not available in this context"
-        ctrl.request_state()
-        import time
-        time.sleep(0.4)
-        snap = ctrl.latest()
-        if not snap:
-            return "(no scene snapshot yet — is the Isaac bridge connected?)"
-        view = {
-            "objects": snap.get("objects"),
-            "holding": snap.get("holding"),
-            "gripper_width": (snap.get("grasp") or {}).get("gripper_width"),
-            "has_camera_frame": bool(snap.get("frame_b64")),
-        }
-        out = json.dumps(view, ensure_ascii=False)
-        if snap.get("frame_b64"):
-            out += "\n" + self.arm_get_camera()
-        return out
-
     def arm_invoke(self, skill: str, args_json: str = "") -> str:
         """Invoke one robot-advertised skill (non-blocking).
 
-        Use a skill name and argument schema exactly as returned by arm_describe
-        (e.g. skill='pick', args_json='{"object":"apple"}'). After this, call
+        Use a skill name and argument schema exactly as returned by arm_describe.
+        Targets are named by the image **pixel** you read off the camera frame
+        (arm_get_camera), e.g. skill='pick', args_json='{"px":171,"py":96}' — the
+        robot back-projects the pixel through the camera. After this, call
         arm_await_completion and END YOUR TURN to suspend the session.
 
         Args:
@@ -229,7 +217,7 @@ class ArmTools:
             wd_prompt = (
                 f"{prompt}\n\n[WATCHDOG] No completion event arrived within "
                 f"{delay:.0f}s. The robot may have finished without notifying, or the "
-                "step may have stalled. Call arm_check_result and arm_get_scene to see "
+                "step may have stalled. Call arm_check_result and arm_get_camera to see "
                 "the current state: if the step actually completed, continue with the "
                 "next step; if it stalled, arm_reset and retry; if you cannot make "
                 "progress, call arm_report_done with what is stuck."
@@ -244,7 +232,12 @@ class ArmTools:
         threading.Thread(target=_watch, daemon=True, name="arm-watchdog").start()
 
     def arm_check_result(self) -> str:
-        """Return the latest step result + scene snapshot to judge the step."""
+        """Return the latest step result to judge the step.
+
+        Reports the command, ok/error and the arm's own proprioception (held? /
+        gripper width) — NOT object positions. To see where things are, look at the
+        camera frame with arm_get_camera.
+        """
         ctrl = self._controller()
         if ctrl is None:
             return "ERROR: arm bus not available in this context"
@@ -256,7 +249,6 @@ class ArmTools:
             "ok": snap.get("ok"),
             "error": snap.get("error"),
             "holding": snap.get("holding"),
-            "objects": snap.get("objects"),
             "grasp": snap.get("grasp"),
             "seq_id": snap.get("seq_id"),
             "episode": snap.get("episode"),
@@ -264,7 +256,12 @@ class ArmTools:
         return json.dumps(view, ensure_ascii=False)
 
     def arm_get_camera(self, path: str = "") -> str:
-        """Save the latest camera RGB frame (if any) to a PNG and return its path.
+        """Look through the robot's camera: fetch a FRESH frame, save it to a PNG and
+        return its path.
+
+        This is how you perceive the scene — read object locations straight off this
+        image (you are never handed object coordinates). Identify your target in the
+        picture and pass its pixel (px, py) to pick/place_at/move_above.
 
         Args:
             path: optional output path; defaults to the project dir.
@@ -272,10 +269,15 @@ class ArmTools:
         ctrl = self._controller()
         if ctrl is None:
             return "ERROR: arm bus not available in this context"
+        # Actively request a fresh frame (the old arm_get_scene did this); the camera
+        # event carries only the frame + proprioception, never object positions.
+        ctrl.request_camera()
+        import time
+        time.sleep(0.4)
         snap = ctrl.latest()
         b64 = (snap or {}).get("frame_b64")
         if not b64:
-            return "(no camera frame available in the latest snapshot)"
+            return "(no camera frame available — is the Isaac bridge connected?)"
         out = self.toolkit._resolve(path or "arm_frame.png")
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -303,7 +305,6 @@ class ArmTools:
         return [
             self.arm_describe,
             self.arm_reset,
-            self.arm_get_scene,
             self.arm_invoke,
             self.arm_act,
             self.arm_await_completion,

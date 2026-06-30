@@ -57,15 +57,70 @@ def test_controller_caches_capabilities():
 
 
 def test_controller_caches_completion_events():
+    # Completion payloads carry proprioception + a camera frame, never object
+    # positions; the controller caches the latest one for the tools to read.
     bus = MessageBus(name="t", source="t")
     ctrl = ArmController(bus)
     bus.publish(P.TOPIC_GRASP_COMPLETED, {
         "seq_id": "s1", "episode": 1, "command": "pick", "ok": True,
-        "holding": "apple", "objects": {"apple": [0.4, 0.0, 0.3]},
+        "holding": True, "grasp": {"gripper_width": 0.03}, "frame_b64": "AAAA",
     })
     snap = ctrl.last_completion()
-    assert snap and snap["holding"] == "apple"
-    assert ctrl.latest()["objects"]["apple"] == [0.4, 0.0, 0.3]
+    assert snap and snap["holding"] is True
+    assert ctrl.latest()["frame_b64"] == "AAAA"
+
+
+def test_controller_caches_camera_snapshot():
+    bus = MessageBus(name="t", source="t")
+    ctrl = ArmController(bus)
+    bus.publish(P.TOPIC_CAMERA, {"holding": False, "frame_b64": "ZZZZ"})
+    assert ctrl.last_camera()["frame_b64"] == "ZZZZ"
+    assert ctrl.latest()["frame_b64"] == "ZZZZ"
+
+
+def test_request_camera_publishes_request():
+    bus = MessageBus(name="t", source="t")
+    seen = []
+    bus.subscribe(P.TOPIC_CAMERA_REQUEST, lambda ev: seen.append(ev))
+    ArmController(bus).request_camera()
+    assert len(seen) == 1
+
+
+def test_no_get_scene_tool_and_check_result_hides_object_positions():
+    # Object positions must not be exposed to the agent: there is no arm_get_scene,
+    # and arm_check_result reports proprioception only — no "objects" coordinates.
+    tools = ArmTools(SimpleNamespace(agent_instance=None))
+    names = {fn.__name__ for fn in tools.callables()}
+    assert "arm_get_scene" not in names
+    assert not hasattr(tools, "arm_get_scene")
+    assert "arm_get_camera" in names
+
+    bus = MessageBus(name="t", source="t")
+    agent = SimpleNamespace(bus=bus, agent_id="t")
+    tools = ArmTools(SimpleNamespace(agent_instance=agent))
+    tools._controller()  # instantiate so it subscribes before the event is published
+    bus.publish(P.TOPIC_GRASP_COMPLETED, {
+        "seq_id": "s1", "command": "pick", "ok": True, "holding": True,
+        "grasp": {"gripper_width": 0.03}, "objects": {"apple": [0.4, 0.0, 0.3]},
+    })
+    view = tools.arm_check_result()
+    assert "objects" not in view and "apple" not in view
+    assert '"holding": true' in view
+
+
+def test_arm_invoke_routes_pixel_target_args():
+    # The agent points at a target by the image pixel it read off the camera frame;
+    # those args ride through to the env verbatim (in .args, not .actions).
+    bus = MessageBus(name="t", source="t")
+    seen = []
+    bus.subscribe(P.TOPIC_ACTION_EXECUTE, lambda ev: seen.append(ev))
+    tools = ArmTools(SimpleNamespace(agent_instance=SimpleNamespace(bus=bus, agent_id="t")))
+
+    tools.arm_invoke("pick", '{"px": 171, "py": 96}')
+
+    assert len(seen) == 1
+    assert seen[0].payload["args"] == {"px": 171, "py": 96}
+    assert seen[0].payload["actions"] == []
 
 
 def test_request_capabilities_publishes_request():

@@ -19,15 +19,21 @@ advertised — add a skill on the robot and the agent can use it with no code ch
 
 ## The interaction paradigm
 
-For each step the agent plans:
+**Perception is camera-only.** The agent is never handed object positions. It
+looks at the camera frame (`arm_get_camera`), finds the target in the image, and
+names it by **pixel** `(px, py)`; the bridge back-projects that pixel through the
+camera. For each step the agent plans:
 
-1. **Dispatch** — `arm_invoke(skill, args)` (or `arm_act(actions)`) publishes
+0. **Look** — `arm_get_camera` fetches a fresh frame; the agent reads the target's
+   pixel off the image.
+1. **Dispatch** — `arm_invoke('pick', {px, py})` (or `arm_act(actions)`) publishes
    `arm.action.execute` (non-blocking).
 2. **Register & suspend** — `arm_await_completion` registers a one-shot bus
    handler on `arm.*.completed`, then the agent **ends its turn** → the session is
    suspended and resources freed (no blocking wait).
 3. **Robot executes** — the bridge runs the skill, then publishes
-   `arm.grasp.completed` / `arm.action.completed` (result + objects + camera frame).
+   `arm.grasp.completed` / `arm.action.completed` (grasp/proprioception result +
+   camera frame; no object coordinates).
 4. **Wake a checker agent** — the handler fires a **fresh agent turn** that calls
    `arm_check_result` (+ `arm_get_camera`) to judge the step.
 5. **Branch** — failed → fix & re-dispatch; succeeded but unfinished → next step;
@@ -38,9 +44,10 @@ Built on existing SSR primitives: `MessageBus`, `SSRAgent.create_bus_handler`
 
 ## Tools (`tools.py`)
 
-`arm_describe`, `arm_reset`, `arm_get_scene`, `arm_invoke`, `arm_act`,
-`arm_await_completion`, `arm_check_result`, `arm_get_camera`, `arm_report_done` —
-merged into the main `ToolKit`.
+`arm_describe`, `arm_reset`, `arm_invoke`, `arm_act`, `arm_await_completion`,
+`arm_check_result`, `arm_get_camera`, `arm_report_done` — merged into the main
+`ToolKit`. (There is no `arm_get_scene`: object positions are not exposed; the
+agent perceives via `arm_get_camera` and targets by pixel.)
 
 ## Run
 

@@ -11,35 +11,40 @@ plans using whatever the robot says it supports, invoking any advertised skill
 generically (or sending raw action vectors). Adding/removing a skill on the robot
 side is automatically reflected to the agent; no brain change is needed.
 
+The brain is **never handed object positions**. The robot advertises its skills and
+camera, and the agent perceives objects by looking at the camera frame and naming a
+target by image **pixel** (px, py), which the robot back-projects through the
+camera. There is no scene-snapshot of object coordinates.
+
 Topics
 ------
 ``arm.capabilities.request`` (brain → robot) : ask for the capability descriptor.
-``arm.capabilities``         (robot → brain) : action space + skills + objects + camera.
+``arm.capabilities``         (robot → brain) : action space + skills + obstacles + camera.
 ``arm.action.execute``       (brain → robot) : invoke a skill (or raw actions).
 ``arm.grasp.completed``      (robot → brain) : a grasping skill finished settling.
 ``arm.action.completed``     (robot → brain) : any other skill finished.
 ``arm.task.success``         (brain → brain) : the agent judged the instruction done.
-``arm.reset`` / ``arm.state.request`` / ``arm.state`` : episode + scene snapshot.
+``arm.reset``                (brain → robot) : reset the episode.
+``arm.camera.request`` / ``arm.camera`` : fetch a fresh camera frame (+ the arm's
+    own proprioception: held? / gripper width). NO object positions.
 
 Capability descriptor (example)::
 
     {
       "action_space": {
-        "type": "JointPositionAction+BinaryGripper",
-        "dof": 8, "joint_names": ["openarm_joint1", ..., "gripper"],
-        "scale": 0.5, "use_default_offset": true,
+        "type": "DifferentialInverseKinematicsAction+BinaryGripper",
+        "dof": 8, "ee_body": "openarm_hand",
         "gripper": {"open": 1.0, "close": -1.0},
-        "low": [...], "high": [...]
+        "pose_format": "[px,py,pz,qw,qx,qy,qz] in robot root frame"
       },
       "skills": [
-        {"name": "pick", "args": {"object": "str"}, "grasping": true,
-         "desc": "grasp a named object and lift it"},
-        {"name": "place_on", "args": {"object": "str"}, "desc": "..."},
-        {"name": "place_at", "args": {"x": "float", "y": "float"}},
-        {"name": "move_above", "args": {"object": "str?", "x": "float?", "y": "float?"}},
+        {"name": "pick", "args": {"px": "float", "py": "float"}, "grasping": true,
+         "desc": "grasp the object at image pixel (px, py) and lift it"},
+        {"name": "place_at", "args": {"px": "float", "py": "float"}},
+        {"name": "move_above", "args": {"px": "float", "py": "float"}},
         {"name": "raw", "args": {"actions": "list[8 floats]"}}
       ],
-      "objects": {"apple": [x,y,z], "orange": [x,y,z]},
+      "obstacles": [{"name": "stand", "aabb": [x0,y0,z0, x1,y1,z1]}],
       "camera": {"width": 320, "height": 240}
     }
 """
@@ -57,8 +62,11 @@ TOPIC_GRASP_COMPLETED = "arm.grasp.completed"
 TOPIC_ACTION_COMPLETED = "arm.action.completed"
 TOPIC_TASK_SUCCESS = "arm.task.success"
 TOPIC_RESET = "arm.reset"
-TOPIC_STATE_REQUEST = "arm.state.request"
-TOPIC_STATE = "arm.state"
+# Fetch a fresh camera frame (+ proprioception). Replaces the old arm.state* scene
+# snapshot, which exposed object positions — the agent now perceives objects only by
+# looking at the returned frame, never from coordinates handed to it.
+TOPIC_CAMERA_REQUEST = "arm.camera.request"
+TOPIC_CAMERA = "arm.camera"
 
 # Topic pattern matching ANY skill completion.
 PATTERN_COMPLETED = "arm.*.completed"

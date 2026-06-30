@@ -3,9 +3,10 @@
 An :class:`ArmController` is a thin shim over an agent's in-process
 :class:`~ssr.bus.core.MessageBus` (bridged to the bus server the robot connects
 to). It never blocks: it *publishes* a request and returns immediately, and it
-caches the robot's capability descriptor and the latest scene snapshot delivered
-by ``arm.capabilities`` / ``arm.*.completed`` / ``arm.state`` so the tools (and
-the woken checker turn) can read them synchronously.
+caches the robot's capability descriptor and the latest snapshot delivered
+by ``arm.capabilities`` / ``arm.*.completed`` / ``arm.camera`` so the tools (and
+the woken checker turn) can read them synchronously. Snapshots carry the camera
+frame + proprioception only — never object positions.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ class ArmController:
         self._lock = threading.Lock()
         self._caps: dict | None = None
         self._last_completion: dict | None = None
-        self._last_state: dict | None = None
+        self._last_camera: dict | None = None
         self._episode = 0
         # seq_id of the most recently dispatched action, so we can tell whether a
         # cached completion belongs to the step we're currently waiting on.
@@ -34,7 +35,7 @@ class ArmController:
         self.bus.subscribe(P.TOPIC_CAPS, self._on_caps)
         self.bus.subscribe(P.TOPIC_GRASP_COMPLETED, self._on_completion)
         self.bus.subscribe(P.TOPIC_ACTION_COMPLETED, self._on_completion)
-        self.bus.subscribe(P.TOPIC_STATE, self._on_state)
+        self.bus.subscribe(P.TOPIC_CAMERA, self._on_camera)
 
     # ------------------------------------------------------------- listeners
     def _on_caps(self, ev: BusEvent) -> None:
@@ -45,9 +46,9 @@ class ArmController:
         with self._lock:
             self._last_completion = dict(ev.payload)
 
-    def _on_state(self, ev: BusEvent) -> None:
+    def _on_camera(self, ev: BusEvent) -> None:
         with self._lock:
-            self._last_state = dict(ev.payload)
+            self._last_camera = dict(ev.payload)
 
     # --------------------------------------------------------------- publish
     def request_capabilities(self, wait: float = 0.0) -> dict | None:
@@ -81,8 +82,8 @@ class ArmController:
         self.bus.publish(P.TOPIC_ACTION_EXECUTE, req.to_payload(), source=self.source)
         return req.seq_id
 
-    def request_state(self) -> None:
-        self.bus.publish(P.TOPIC_STATE_REQUEST, {}, source=self.source)
+    def request_camera(self) -> None:
+        self.bus.publish(P.TOPIC_CAMERA_REQUEST, {}, source=self.source)
 
     # ----------------------------------------------------------------- read
     @property
@@ -109,11 +110,12 @@ class ArmController:
             c = self._last_completion
             return bool(c and self._pending_seq and c.get("seq_id") == self._pending_seq)
 
-    def last_state(self) -> dict | None:
+    def last_camera(self) -> dict | None:
         with self._lock:
-            return dict(self._last_state) if self._last_state else None
+            return dict(self._last_camera) if self._last_camera else None
 
     def latest(self) -> dict | None:
-        """Most recent scene snapshot from any source (completion or state)."""
+        """Most recent snapshot from any source (completion or camera fetch). Carries
+        the camera frame + proprioception; never object positions."""
         with self._lock:
-            return dict(self._last_completion or self._last_state or {}) or None
+            return dict(self._last_completion or self._last_camera or {}) or None
