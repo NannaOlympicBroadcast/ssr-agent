@@ -95,6 +95,98 @@ def cmd_init(args, settings: Settings, console: Console) -> int:
     return 0
 
 
+def _merge_hosted_mcp(settings: Settings, url: str | None) -> None:
+    """Add the persist-vault Hosted Tools SSE-MCP server to ~/.ssr/mcp.json."""
+    if not url:
+        return
+    import json
+
+    path = settings.mcp_config
+    try:
+        data = json.loads(path.read_text("utf-8")) if path.exists() else {}
+    except Exception:
+        data = {}
+    servers = data.get("mcpServers") or data.get("servers") or {}
+    servers["hosted-integrations"] = {"url": url, "description": "persist-vault Hosted Tools"}
+    data["mcpServers"] = servers
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+
+
+def cmd_login(args, settings: Settings, console: Console) -> int:
+    """Pair this agent with a persist-vault cloud account (OAuth-style device flow).
+
+    Opens the site's approval page in a browser; the user confirms, copies the
+    authorization code shown there, and pastes it back here. We then store the
+    account token + cloud-bus + Hosted-Tools URLs in ~/.ssr/cloud.json so every
+    subsequent ``ssr`` run joins the cloud bus and loads the hosted tools.
+    """
+    import json
+    import socket
+    import webbrowser
+
+    try:
+        import httpx
+    except Exception:
+        console.print("[red]httpx not available — cannot run ssr login[/red]")
+        return 1
+
+    base = (getattr(args, "url", None) or "").strip().rstrip("/")
+    if not base:
+        base = console.input("persist-vault 站点地址 (如 https://vault.example.com): ").strip().rstrip("/")
+    if not base:
+        console.print("[red]需要提供 persist-vault 站点地址[/red]")
+        return 1
+    device = getattr(args, "device", None) or socket.gethostname()
+
+    try:
+        with httpx.Client(timeout=30) as c:
+            r = c.post(f"{base}/api/pair/start", json={"device_label": device})
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        console.print(f"[red]发起配对失败：{e}[/red]")
+        return 1
+
+    verify = data.get("verification_url")
+    console.print("\n[bold]请在浏览器中打开并确认配对：[/bold]")
+    console.print(f"  [cyan]{verify}[/cyan]")
+    try:
+        webbrowser.open(verify)
+    except Exception:
+        pass
+
+    code = console.input("\n确认后，把网页上显示的授权码粘贴到这里: ").strip()
+    if not code:
+        console.print("[red]未输入授权码[/red]")
+        return 1
+
+    try:
+        with httpx.Client(timeout=30) as c:
+            r = c.post(f"{base}/api/pair/exchange", json={"code": code})
+            if r.status_code != 200:
+                try:
+                    msg = r.json().get("error", r.text)
+                except Exception:
+                    msg = r.text
+                console.print(f"[red]兑换失败：{msg}[/red]")
+                return 1
+            creds = r.json()
+    except Exception as e:
+        console.print(f"[red]兑换授权码失败：{e}[/red]")
+        return 1
+
+    settings.ensure_dirs()
+    settings.cloud_config.write_text(json.dumps(creds, ensure_ascii=False, indent=2), "utf-8")
+    _merge_hosted_mcp(settings, creds.get("hosted_mcp_url"))
+
+    console.print(f"\n[green]✓[/green] 已与账号 [bold]{creds.get('username')}[/bold] 配对。")
+    console.print(f"  云端总线: {creds.get('bus_url')}")
+    console.print(f"  Hosted Tools: {creds.get('hosted_mcp_url')}")
+    console.print("  下次启动 ssr 时将自动接入云端总线并加载 Hosted Tools。")
+    return 0
+
+
 def cmd_ask(args, settings: Settings, console: Console) -> int:
     from .agent.core import SSRAgent
 
@@ -1180,6 +1272,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("prompt")
     ask.add_argument("--cwd", help="project directory")
 
+    login = sub.add_parser("login", help="pair this agent with a persist-vault cloud account (cloud bus + Hosted Tools)")
+    login.add_argument("url", nargs="?", help="persist-vault site URL, e.g. https://vault.example.com")
+    login.add_argument("--device", help="device label shown on the approval page")
+
     idx = sub.add_parser("index", help="(re)build the model2vec context index")
     idx.add_argument("category", nargs="?", help="tools|configurations|skills|memory")
 
@@ -1370,10 +1466,12 @@ def main(argv: list[str] | None = None) -> int:
     # The main process hosts a non-blocking bus server so external scripts and
     # other agents can talk to this agent's bus. Skip it for commands that are
     # not running an agent (or are the bus server themselves).
-    if args.command not in ("init", "index", "bus", "task", "models", "srdb"):
+    if args.command not in ("init", "index", "bus", "task", "models", "srdb", "login"):
         ensure_bus_server(settings, console)
     if args.command == "init":
         return cmd_init(args, settings, console)
+    if args.command == "login":
+        return cmd_login(args, settings, console)
     if args.command == "ask":
         return cmd_ask(args, settings, console)
     if args.command == "index":
