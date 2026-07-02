@@ -45,9 +45,22 @@ Built on existing SSR primitives: `MessageBus`, `SSRAgent.create_bus_handler`
 ## Tools (`tools.py`)
 
 `arm_describe`, `arm_reset`, `arm_invoke`, `arm_act`, `arm_await_completion`,
-`arm_check_result`, `arm_get_camera`, `arm_report_done` — merged into the main
-`ToolKit`. (There is no `arm_get_scene`: object positions are not exposed; the
-agent perceives via `arm_get_camera` and targets by pixel.)
+`arm_check_result`, `arm_get_camera`, `arm_record_start`, `arm_record_stop`,
+`arm_report_done` — merged into the main `ToolKit`. (There is no `arm_get_scene`:
+object positions are not exposed; the agent perceives via `arm_get_camera` and
+targets by pixel.)
+
+### Recording & reflection
+
+Any camera the robot advertises (`arm_describe → recording.cameras`) can be
+recorded: `arm_record_start(camera)` before dispatching a skill,
+`arm_record_stop()` after its completion — the robot encodes the buffered frames
+(MP4 when ffmpeg is available, else GIF) and ships them back over the bus; the
+tool saves the file locally and returns its path. **Reviewing the recording of
+the whole motion — not just an end frame — is how the agent reflects**: was the
+approach centred, did the gripper actually close on the object, did the arm clip
+an obstacle? Feeding that back into the next attempt substantially improves task
+accuracy.
 
 ## Run
 

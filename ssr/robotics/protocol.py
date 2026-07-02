@@ -27,6 +27,9 @@ Topics
 ``arm.reset``                (brain → robot) : reset the episode.
 ``arm.camera.request`` / ``arm.camera`` : fetch a fresh camera frame (+ the arm's
     own proprioception: held? / gripper width). NO object positions.
+``arm.record.start`` / ``arm.record.stop`` (brain → robot) : record any advertised
+    camera; ``arm.record.started`` acks, ``arm.record.saved`` (robot → brain)
+    returns the encoded video for the brain to save and review.
 
 Capability descriptor (example)::
 
@@ -67,6 +70,15 @@ TOPIC_RESET = "arm.reset"
 # looking at the returned frame, never from coordinates handed to it.
 TOPIC_CAMERA_REQUEST = "arm.camera.request"
 TOPIC_CAMERA = "arm.camera"
+# Camera recording: start/stop buffering frames on the robot side from any of the
+# advertised cameras; the robot replies with arm.record.started (ack/error) and, on
+# stop, arm.record.saved carrying the encoded video (video_b64 + format/fps/frames)
+# so the brain can save it and REVIEW the motion — reflecting on a recording of the
+# whole step is far more informative than a single after-the-fact frame.
+TOPIC_RECORD_START = "arm.record.start"
+TOPIC_RECORD_STOP = "arm.record.stop"
+TOPIC_RECORD_STARTED = "arm.record.started"
+TOPIC_RECORD_SAVED = "arm.record.saved"
 
 # Topic pattern matching ANY skill completion.
 PATTERN_COMPLETED = "arm.*.completed"

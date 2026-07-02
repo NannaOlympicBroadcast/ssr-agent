@@ -295,3 +295,73 @@ def test_toolkit_auto_approves_under_env_flag(tmp_path, monkeypatch):
         monkeypatch.setenv("SSR_AUTO_APPROVE", val)
         tk_auto = ToolKit(settings, retriever=None, memory=None)
         assert isinstance(tk_auto.approval_handler, AutoApprovalHandler), val
+
+
+def test_controller_record_start_stop_publish_and_cache():
+    import base64
+
+    bus = MessageBus(name="t", source="t")
+    seen = []
+    bus.subscribe(P.TOPIC_RECORD_START, lambda ev: seen.append(("start", ev.payload)))
+    bus.subscribe(P.TOPIC_RECORD_STOP, lambda ev: seen.append(("stop", ev.payload)))
+    ctrl = ArmController(bus)
+
+    ctrl.record_start("tiled_camera", every=3)
+    assert seen[0][0] == "start"
+    assert seen[0][1]["camera"] == "tiled_camera" and seen[0][1]["every"] == 3
+
+    # A stale recording from a previous stop must not satisfy the next stop.
+    bus.publish(P.TOPIC_RECORD_SAVED, {"ok": True, "video_b64": "old"})
+    assert ctrl.last_recording()["video_b64"] == "old"
+    ctrl.record_stop()
+    assert seen[-1][0] == "stop"
+    assert ctrl.last_recording() is None  # cleared, awaiting the fresh one
+    payload = {"ok": True, "format": "gif", "frames": 7, "camera": "tiled_camera",
+               "video_b64": base64.b64encode(b"GIF89a").decode()}
+    bus.publish(P.TOPIC_RECORD_SAVED, payload)
+    assert ctrl.last_recording()["frames"] == 7
+
+
+def test_arm_record_stop_saves_video_file(tmp_path):
+    import base64
+    import threading
+
+    bus = MessageBus(name="t", source="t")
+    agent = SimpleNamespace(bus=bus, agent_id="t")
+    toolkit = SimpleNamespace(agent_instance=agent,
+                              _resolve=lambda p: tmp_path / p)
+    tools = ArmTools(toolkit)
+
+    # Robot side: reply to arm.record.stop with a saved recording.
+    def _reply(ev):
+        threading.Timer(0.05, lambda: bus.publish(P.TOPIC_RECORD_SAVED, {
+            "ok": True, "format": "gif", "fps": 10, "frames": 3, "dropped": 0,
+            "camera": "tiled_camera",
+            "video_b64": base64.b64encode(b"GIF89a-fake").decode(),
+        })).start()
+
+    bus.subscribe(P.TOPIC_RECORD_STOP, _reply)
+
+    msg = tools.arm_record_start("")
+    assert "Recording requested" in msg
+    msg = tools.arm_record_stop()
+    assert "Saved recording" in msg and "reflect" in msg
+    out = tmp_path / "arm_recording.gif"
+    assert out.read_bytes() == b"GIF89a-fake"
+
+
+def test_arm_record_stop_reports_robot_error(tmp_path):
+    import threading
+
+    bus = MessageBus(name="t", source="t")
+    toolkit = SimpleNamespace(agent_instance=SimpleNamespace(bus=bus, agent_id="t"),
+                              _resolve=lambda p: tmp_path / p)
+    tools = ArmTools(toolkit)
+
+    def _reply(ev):
+        threading.Timer(0.05, lambda: bus.publish(
+            P.TOPIC_RECORD_SAVED, {"ok": False, "error": "not recording"})).start()
+
+    bus.subscribe(P.TOPIC_RECORD_STOP, _reply)
+    msg = tools.arm_record_stop()
+    assert "ERROR" in msg and "not recording" in msg

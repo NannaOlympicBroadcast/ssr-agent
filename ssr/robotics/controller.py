@@ -28,6 +28,7 @@ class ArmController:
         self._caps: dict | None = None
         self._last_completion: dict | None = None
         self._last_camera: dict | None = None
+        self._last_recording: dict | None = None
         self._episode = 0
         # seq_id of the most recently dispatched action, so we can tell whether a
         # cached completion belongs to the step we're currently waiting on.
@@ -36,6 +37,7 @@ class ArmController:
         self.bus.subscribe(P.TOPIC_GRASP_COMPLETED, self._on_completion)
         self.bus.subscribe(P.TOPIC_ACTION_COMPLETED, self._on_completion)
         self.bus.subscribe(P.TOPIC_CAMERA, self._on_camera)
+        self.bus.subscribe(P.TOPIC_RECORD_SAVED, self._on_recording)
 
     # ------------------------------------------------------------- listeners
     def _on_caps(self, ev: BusEvent) -> None:
@@ -49,6 +51,10 @@ class ArmController:
     def _on_camera(self, ev: BusEvent) -> None:
         with self._lock:
             self._last_camera = dict(ev.payload)
+
+    def _on_recording(self, ev: BusEvent) -> None:
+        with self._lock:
+            self._last_recording = dict(ev.payload)
 
     # --------------------------------------------------------------- publish
     def request_capabilities(self, wait: float = 0.0) -> dict | None:
@@ -85,6 +91,22 @@ class ArmController:
     def request_camera(self) -> None:
         self.bus.publish(P.TOPIC_CAMERA_REQUEST, {}, source=self.source)
 
+    def record_start(self, camera: str = "", every: int | None = None,
+                     max_frames: int | None = None) -> None:
+        payload: dict = {"camera": camera}
+        if every is not None:
+            payload["every"] = int(every)
+        if max_frames is not None:
+            payload["max_frames"] = int(max_frames)
+        self.bus.publish(P.TOPIC_RECORD_START, payload, source=self.source)
+
+    def record_stop(self) -> None:
+        # Clear the previous recording first so callers polling last_recording()
+        # can't mistake a stale video for this stop's result.
+        with self._lock:
+            self._last_recording = None
+        self.bus.publish(P.TOPIC_RECORD_STOP, {}, source=self.source)
+
     # ----------------------------------------------------------------- read
     @property
     def episode(self) -> int:
@@ -113,6 +135,18 @@ class ArmController:
     def last_camera(self) -> dict | None:
         with self._lock:
             return dict(self._last_camera) if self._last_camera else None
+
+    def last_recording(self) -> dict | None:
+        with self._lock:
+            return dict(self._last_recording) if self._last_recording else None
+
+    def take_recording(self) -> dict | None:
+        """Pop the cached recording (or ``None``). Consuming it means a video that
+        arrived AFTER a stop's poll window (encoding can outlast it) is delivered by
+        the next ``arm_record_stop`` call instead of being wiped by its re-stop."""
+        with self._lock:
+            rec, self._last_recording = self._last_recording, None
+            return rec
 
     def latest(self) -> dict | None:
         """Most recent snapshot from any source (completion or camera fetch). Carries

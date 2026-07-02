@@ -1,6 +1,8 @@
 {
   "name": "openarm",
-  "version": "0.1.0",
-  "description": "OpenArm / Isaac Lab robot-arm control. Capability-driven skills (pick / place_at / move_above / raw) discovered at runtime and driven over the SSR event bus with a suspend -> completion-handler -> wake loop. Contributes the arm_* agent tools in-process; the environment side is the ssr-robotics Isaac Lab bridge.",
-  "agent_tools": ["ssr.robotics.tools:ArmTools"]
+  "version": "0.2.0",
+  "description": "OpenArm / Isaac Lab robot-arm control. Capability-driven skills (pick / place_at / move_above / raw) discovered at runtime and driven over the SSR event bus with a suspend -> completion-handler -> wake loop. Perception is camera-only: look with arm_get_camera and target by image pixel (px, py) — object positions are never handed to the agent. Contributes the arm_* agent tools in-process; the environment side is the ssr-robotics Isaac Lab bridge. RECORDING & REFLECTION: any advertised camera can be recorded — call arm_record_start before invoking a skill and arm_record_stop after its completion, then READ the saved video and reflect on the full motion (was the approach centred? did the gripper actually close on the object? did the arm clip an obstacle?) instead of judging from a single end frame. Feeding what the recording shows back into the next attempt substantially improves task accuracy; do this whenever a step fails or the result looks uncertain.",
+  "agent_tools": [
+    "ssr.robotics.tools:ArmTools"
+  ]
 }

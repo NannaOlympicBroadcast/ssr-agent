@@ -287,6 +287,73 @@ class ArmTools:
         meta = snap.get("camera") or {}
         return f"Saved camera frame to {out} ({meta.get('width', '?')}x{meta.get('height', '?')})."
 
+    def arm_record_start(self, camera: str = "") -> str:
+        """Start recording a robot camera (non-blocking).
+
+        Recording captures the WHOLE motion, not just an end frame — start one
+        before invoking a skill, stop it after the completion event, then review
+        the saved video to reflect: was the approach centred? did the gripper
+        close on the object or beside it? did the arm clip an obstacle? Use what
+        you see to correct the next attempt. This reflection loop measurably
+        improves task accuracy over judging from a single after-the-fact photo.
+
+        Args:
+            camera: which camera to record — a name from arm_describe's
+                "recording.cameras" list (empty = the main camera).
+        """
+        ctrl = self._controller()
+        if ctrl is None:
+            return "ERROR: arm bus not available in this context"
+        ctrl.record_start(camera)
+        return (f"Recording requested on camera '{camera or '(main)'}'. Now invoke "
+                "the skill(s) you want captured; call arm_record_stop afterwards "
+                "to save and review the video.")
+
+    def arm_record_stop(self, path: str = "") -> str:
+        """Stop the recording, save the video locally, and return its path.
+
+        Review the saved video (view the file) to reflect on the executed motion
+        before planning the next step — compare what you intended with what the
+        arm actually did, and correct accordingly.
+
+        Args:
+            path: optional output path; defaults to the project dir (extension is
+                set from the video format the robot returns).
+        """
+        ctrl = self._controller()
+        if ctrl is None:
+            return "ERROR: arm bus not available in this context"
+        # A video from a previous stop may have finished encoding after its poll
+        # window closed — deliver it instead of double-stopping (which would both
+        # wipe it and draw a "not recording" error from the robot).
+        rec = ctrl.take_recording()
+        if rec is None:
+            ctrl.record_stop()
+            # Encoding a long clip takes a moment on the robot side — poll briefly.
+            import time
+            for _ in range(40):  # up to ~10 s
+                time.sleep(0.25)
+                rec = ctrl.take_recording()
+                if rec is not None:
+                    break
+        if rec is None:
+            return ("(no recording arrived within 10s — the robot may still be "
+                    "encoding; call arm_record_stop again to re-check, or verify "
+                    "the Isaac bridge is connected)")
+        if not rec.get("ok"):
+            return f"ERROR: recording failed: {rec.get('error') or 'unknown'}"
+        fmt = rec.get("format") or "gif"
+        out = self.toolkit._resolve(path or f"arm_recording.{fmt}")
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(base64.b64decode(rec.get("video_b64") or ""))
+        except Exception as e:
+            return f"ERROR: could not write recording: {e}"
+        return (f"Saved recording to {out} ({rec.get('frames', '?')} frames, "
+                f"{fmt}, camera '{rec.get('camera', '?')}'). Review it to reflect "
+                "on the motion — verify the grasp/placement actually happened as "
+                "intended and correct the next step if not.")
+
     def arm_report_done(self, summary: str = "") -> str:
         """Signal the user's instruction is complete (publishes arm.task.success).
 
@@ -310,5 +377,7 @@ class ArmTools:
             self.arm_await_completion,
             self.arm_check_result,
             self.arm_get_camera,
+            self.arm_record_start,
+            self.arm_record_stop,
             self.arm_report_done,
         ]

@@ -72,8 +72,11 @@ def run_instruction(settings, instruction: str, bus_url: str | None = None,
         "先抬到物体正上方再下降抓取，移动到别处前先抬升到障碍物之上，避免在低空横向直线穿过桌面/台子。\n"
         "4) 像素只需大致落在目标上即可：机械臂会用相机视觉（俯视相机，若配置了腕部相机还会做局部居中修正）"
         "精确定位抓取点；到达航点也有一定容差范围，不必追求绝对精确。\n"
-        "5) 每下发一步后，调用 arm_await_completion 注册回调，然后结束本回合以挂起会话、释放资源。\n"
-        "6) 被总线事件唤醒后，用 arm_check_result 和 arm_get_camera（重新看相机）判断这一步是否成功：\n"
+        "5) 每下发一步后，调用 arm_await_completion 注册回调，然后结束本回合以挂起会话、释放资源。"
+        "关键或容易失败的步骤，可以先 arm_record_start 开始录像再下发。\n"
+        "6) 被总线事件唤醒后，用 arm_check_result 和 arm_get_camera（重新看相机）判断这一步是否成功；"
+        "若在录像，先 arm_record_stop 保存录像并回看整个动作过程来反思（接近是否居中、夹爪是否真的夹住、"
+        "有没有碰撞障碍物），据此修正下一步：\n"
         "   失败就修正并重发该步；成功但指令未完成就下发下一步；都完成后调用 arm_report_done。"
     )
     if console:
