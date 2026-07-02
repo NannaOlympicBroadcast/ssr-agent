@@ -72,7 +72,8 @@ class GeminiProvider(AbstractProvider):
 
                 if is_mcp_tool_name(call.name) and self.agent_instance is not None:
                     try:
-                        result = self.agent_instance.mcp_manager.call_tool(call.name, args)
+                        result = self.agent_instance.mcp_manager.call_tool(
+                            call.name, args, agent=self.agent_instance)
                     except Exception as e:
                         result = f"ERROR: {type(e).__name__}: {e}"
                 elif fn is None:

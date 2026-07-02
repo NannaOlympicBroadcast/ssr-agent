@@ -135,7 +135,10 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   `~/.ssr/mcp.json` and speaks JSON-RPC over stdio; tools are exposed to the
   model as `mcp__<server>__<tool>` and routed by `SSRAgent`; failed/timed-out MCP
   servers are killed (no orphan leak) and children are tied to the parent via a
-  Windows Job object), `gateway` (`ssr gateway` — installs a channel-bound
+  Windows Job object; an `image` content block in a tool's result — e.g. a
+  screenshot tool — is decoded and attached to the model's next turn via
+  `SSRAgent.queue_tool_image` instead of collapsing to a `[image ...]` caption
+  the model can't act on), `gateway` (`ssr gateway` — installs a channel-bound
   instance as a **system service** per OS: systemd user unit / launchd plist /
   **Windows → Docker** (the native nssm / Scheduled-Task backends are
   **deprecated**: on Windows the gateway runs in a Docker container by default —

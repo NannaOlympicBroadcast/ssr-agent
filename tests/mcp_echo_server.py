@@ -5,12 +5,20 @@ Implements just enough of the protocol — ``initialize``, ``tools/list`` and
 JSON-RPC, exactly as the MCP stdio transport specifies.
 """
 
+import base64
 import json
 import sys
 
 # Force output to utf-8
 sys.stdin.reconfigure(encoding='utf-8')
 sys.stdout.reconfigure(encoding='utf-8')
+
+# A tiny real 1x1 PNG, used by the "snapshot" tool to prove an MCP server can
+# legally return an image content block (the spec allows this; the client used
+# to silently discard it).
+_PNG_1PX = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 TOOLS = [
     {
@@ -30,6 +38,11 @@ TOOLS = [
             "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
             "required": ["a", "b"],
         },
+    },
+    {
+        "name": "snapshot",
+        "description": "Return a tiny screenshot as an image content block.",
+        "inputSchema": {"type": "object", "properties": {}},
     },
 ]
 
@@ -80,6 +93,11 @@ def main():
                     _text_result(mid, str(args["a"] + args["b"]))
                 except Exception as e:  # report through MCP's isError channel
                     _text_result(mid, f"add failed: {e}", is_error=True)
+            elif name == "snapshot":
+                _send({"jsonrpc": "2.0", "id": mid, "result": {"content": [
+                    {"type": "image", "mimeType": "image/png",
+                     "data": base64.b64encode(_PNG_1PX).decode("ascii")},
+                ], "isError": False}})
             else:
                 _send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"unknown tool {name}"}})
         elif mid is not None:

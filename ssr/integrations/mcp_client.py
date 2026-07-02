@@ -32,6 +32,7 @@ Config format (``mcpServers`` or ``servers`` key)::
 from __future__ import annotations
 
 import atexit
+import base64
 import json
 import logging
 import os
@@ -184,12 +185,17 @@ class MCPServer:
     def tools(self) -> list[MCPTool]:
         return list(self._tools)
 
-    def call(self, tool: str, arguments: Optional[dict] = None) -> str:
-        """Invoke ``tool`` and return its result content flattened to text."""
+    def call(self, tool: str, arguments: Optional[dict] = None, on_image=None) -> str:
+        """Invoke ``tool`` and return its result content flattened to text.
+
+        ``on_image(data: bytes, mime_type: str)``, if given, receives the decoded
+        bytes of any ``image`` content block instead of it being discarded — see
+        :func:`_flatten_content`.
+        """
         if not self._started:
             raise MCPError(f"MCP server '{self.name}' is not running")
         result = self._request("tools/call", {"name": tool, "arguments": arguments or {}})
-        return _flatten_content(result)
+        return _flatten_content(result, on_image=on_image)
 
     def _close_job(self) -> None:
         """Close the Windows Job handle (kills any process still inside it)."""
@@ -387,12 +393,17 @@ class MCPSSEServer:
     def tools(self) -> list[MCPTool]:
         return list(self._tools)
 
-    def call(self, tool: str, arguments: Optional[dict] = None) -> str:
-        """Invoke ``tool`` and return its result content flattened to text."""
+    def call(self, tool: str, arguments: Optional[dict] = None, on_image=None) -> str:
+        """Invoke ``tool`` and return its result content flattened to text.
+
+        ``on_image(data: bytes, mime_type: str)``, if given, receives the decoded
+        bytes of any ``image`` content block instead of it being discarded — see
+        :func:`_flatten_content`.
+        """
         if not self._started:
             raise MCPError(f"MCP server '{self.name}' is not running")
         result = self._request("tools/call", {"name": tool, "arguments": arguments or {}})
-        return _flatten_content(result)
+        return _flatten_content(result, on_image=on_image)
 
     def stop(self) -> None:
         """Close HTTP clients and connection."""
@@ -696,8 +707,15 @@ class MCPManager:
     def has_tools(self) -> bool:
         return bool(self._tools)
 
-    def call_tool(self, qualified_name: str, arguments: Optional[dict] = None) -> str:
-        """Route a ``mcp__<server>__<tool>`` call to the owning server."""
+    def call_tool(self, qualified_name: str, arguments: Optional[dict] = None, agent=None) -> str:
+        """Route a ``mcp__<server>__<tool>`` call to the owning server.
+
+        ``agent``, if given and it implements ``queue_tool_image`` (see
+        :class:`ssr.agent.core.SSRAgent`), receives any image content block the
+        tool's result carries — e.g. a screenshot tool's actual picture — so it
+        gets attached to the model's next turn instead of collapsing to a
+        "[image ...]" placeholder caption the model can't act on.
+        """
         tool = self._tools.get(qualified_name)
         if tool is None:
             server_name, tool_name = split_qualified_name(qualified_name)
@@ -706,7 +724,11 @@ class MCPManager:
         server = self._servers.get(server_name)
         if server is None:
             raise MCPError(f"unknown MCP server '{server_name}'")
-        return server.call(tool_name, arguments)
+        on_image = None
+        if agent is not None and hasattr(agent, "queue_tool_image"):
+            on_image = lambda data, mime, _name=qualified_name: agent.queue_tool_image(
+                data, mime_type=mime, label=f"mcp:{_name}")
+        return server.call(tool_name, arguments, on_image=on_image)
 
     def shutdown(self) -> None:
         for server in self._servers.values():
@@ -899,8 +921,19 @@ def resolve_dirnames(val: Any, dirname: str) -> Any:
     return val
 
 
-def _flatten_content(result: Any) -> str:
-    """Turn an MCP ``tools/call`` result into a plain text string."""
+def _flatten_content(result: Any, on_image=None) -> str:
+    """Turn an MCP ``tools/call`` result into a plain text string.
+
+    The MCP spec allows ``content`` blocks of type ``image`` (base64 ``data`` +
+    ``mimeType``), not just ``text`` — a screenshot tool is a normal, spec-legal
+    MCP tool. When ``on_image`` is given, every image block's bytes are decoded
+    and handed to it (``on_image(data: bytes, mime_type: str)``) instead of being
+    silently thrown away into a placeholder caption — without this, EVERY MCP
+    tool that returns a picture is invisible to the model, the exact same failure
+    class as the fixed ``arm_get_camera`` bug (an agent that only ever reads
+    "[image image/png]" text can't act on what's in the picture). Falls back to
+    the old placeholder when no callback is given or a block fails to decode.
+    """
     if not isinstance(result, dict):
         return str(result)
     parts: list[str] = []
@@ -911,7 +944,19 @@ def _flatten_content(result: Any) -> str:
         btype = block.get("type")
         if btype == "text":
             parts.append(block.get("text", ""))
-        elif btype in ("image", "audio"):
+        elif btype == "image":
+            mime = block.get("mimeType") or "image/png"
+            attached = False
+            if on_image is not None:
+                try:
+                    data = base64.b64decode(block.get("data") or "")
+                    if data:
+                        on_image(data, mime)
+                        attached = True
+                except Exception:
+                    attached = False
+            parts.append("[image attached to this turn]" if attached else f"[image {mime}]")
+        elif btype == "audio":
             parts.append(f"[{btype} {block.get('mimeType', '')}]")
         elif btype == "resource":
             res = block.get("resource", {})
