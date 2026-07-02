@@ -3,20 +3,28 @@
 The action types are **not** baked into these tools. The robot advertises its
 capabilities (low-level action space + the skills it implements); the agent reads
 them with ``arm_describe`` and then invokes *any* advertised skill generically
-with ``arm_invoke`` (or sends raw action vectors with ``arm_act``). The brain
-adapts to whatever the robot supports — adding a skill on the robot needs no
-brain change.
+with ``arm_invoke`` (or sends raw action vectors with ``arm_act``).
+
+**Grasping is delegated, not planned here.** The agent is the big brain (大脑):
+it looks at the camera frame, crops the target object out of it (``arm_grasp``
+with a pixel bbox) and hands the grasp to the **cerebellum** (小脑,
+:mod:`ssr.robotics.cerebellum`) over the bus. The cerebellum closes the realtime
+loop with the Om-Agent VLX-Flow streaming vision model (camera RTSP stream in,
+servo corrections out) and calls back with ``arm.grasp.result``.
 
 Typical flow for an arbitrary instruction:
-``arm_describe`` (learn skills + objects) → ``arm_invoke('pick', {object:'apple'})``
-→ ``arm_await_completion`` then END THE TURN → [woken] ``arm_check_result`` →
-``arm_invoke('place_on', {object:'orange'})`` → … → ``arm_report_done``.
+``arm_describe`` (learn skills + objects) → ``arm_get_camera`` (look at the
+frame) → ``arm_grasp('apple', '[x0,y0,x1,y1]')`` → ``arm_await_grasp`` then END
+THE TURN → [woken] ``arm_check_grasp`` → ``arm_invoke('place_at', {...})`` →
+``arm_await_completion`` → … → ``arm_report_done``.
 """
 
 from __future__ import annotations
 
 import base64
+import io
 import json
+import time
 
 from . import protocol as P
 from .controller import ArmController
@@ -89,12 +97,78 @@ class ArmTools:
             out += "\n" + self.arm_get_camera()
         return out
 
+    def arm_grasp(self, label: str, bbox_json: str, instruction: str = "") -> str:
+        """Delegate grasping ONE object to the cerebellum (VLX-Flow realtime loop).
+
+        This is how grasping works now — do NOT try to plan a grasp yourself.
+        As the big brain your only vision job is: look at the latest camera
+        frame (arm_get_camera) and give the pixel bounding box of the target.
+        This tool crops that box out of the frame and publishes it on the bus
+        (arm.grasp.request); the cerebellum streams the live camera to the
+        VLX-Flow model and servo-drives the arm in realtime until the grasp
+        succeeds or fails, then calls back on arm.grasp.result. After this,
+        call arm_await_grasp and END YOUR TURN to suspend.
+
+        Args:
+            label: short name of the target object (e.g. 'apple' / '苹果').
+            bbox_json: JSON array [x0, y0, x1, y1] — the target's pixel box in
+                the latest camera frame (origin top-left, x right, y down).
+            instruction: optional extra natural-language context for the grasp.
+        """
+        ctrl = self._controller()
+        if ctrl is None:
+            return "ERROR: arm bus not available in this context"
+        try:
+            box = json.loads(bbox_json)
+            assert isinstance(box, list) and len(box) == 4
+            x0, y0, x1, y1 = (float(v) for v in box)
+        except Exception:
+            return "ERROR: bbox_json must be a JSON array [x0, y0, x1, y1]"
+        if x1 <= x0 or y1 <= y0:
+            return "ERROR: bbox must satisfy x0 < x1 and y0 < y1"
+        snap = ctrl.latest()
+        if not (snap or {}).get("frame_b64"):
+            ctrl.request_state()
+            time.sleep(0.6)
+            snap = ctrl.latest()
+        b64 = (snap or {}).get("frame_b64")
+        if not b64:
+            return ("ERROR: no camera frame available — is the Isaac bridge "
+                    "connected? Try arm_get_scene first.")
+        try:
+            from PIL import Image
+        except ImportError:
+            return "ERROR: pillow is required for cropping (pip install pillow)"
+        try:
+            img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+            w, h = img.size
+            crop_box = (max(0, int(x0)), max(0, int(y0)),
+                        min(w, int(round(x1))), min(h, int(round(y1))))
+            if crop_box[2] <= crop_box[0] or crop_box[3] <= crop_box[1]:
+                return f"ERROR: bbox {box} lies outside the {w}x{h} camera frame"
+            crop = img.crop(crop_box)
+            buf = io.BytesIO()
+            crop.save(buf, format="PNG")
+            crop_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception as e:
+            return f"ERROR: could not crop the camera frame: {e}"
+        req = P.ArmGraspRequest(
+            seq_id="", label=label, target_b64=crop_b64,
+            bbox=[float(c) for c in crop_box], frame_width=w, frame_height=h,
+            instruction=instruction,
+        )
+        seq = ctrl.grasp(req)
+        return (f"Grasp of '{label}' delegated to the cerebellum "
+                f"(seq_id={seq}, target crop {crop.size[0]}x{crop.size[1]}px). "
+                "Now call arm_await_grasp and END YOUR TURN to suspend.")
+
     def arm_invoke(self, skill: str, args_json: str = "") -> str:
         """Invoke one robot-advertised skill (non-blocking).
 
         Use a skill name and argument schema exactly as returned by arm_describe
-        (e.g. skill='pick', args_json='{"object":"apple"}'). After this, call
-        arm_await_completion and END YOUR TURN to suspend the session.
+        (e.g. skill='move_above', args_json='{"x":0.5,"y":-0.1}'). Do NOT use
+        this for grasping — grasping goes through arm_grasp (the cerebellum).
+        After this, call arm_await_completion and END YOUR TURN to suspend.
 
         Args:
             skill: the skill name from arm_describe's "skills" list.
@@ -243,6 +317,63 @@ class ArmTools:
 
         threading.Thread(target=_watch, daemon=True, name="arm-watchdog").start()
 
+    def arm_await_grasp(self, handler_prompt: str = "", timeout_s: float = 300.0) -> str:
+        """Register a one-shot handler that wakes a new turn when the cerebellum
+        finishes the delegated grasp (arm.grasp.result).
+
+        Same asynchronous paradigm as arm_await_completion: call this right after
+        arm_grasp, then END YOUR TURN. The cerebellum's VLX-Flow loop can take a
+        while (it servo-drives the arm frame by frame), hence the larger default
+        watchdog timeout.
+
+        Args:
+            handler_prompt: instructions for the woken checker turn (optional).
+            timeout_s: watchdog timeout — a timer wakes a checker turn anyway if
+                no grasp result arrives within this many seconds.
+        """
+        agent = getattr(self.toolkit, "agent_instance", None)
+        if agent is None or not hasattr(agent, "create_bus_handler"):
+            return "ERROR: arm bus not available in this context"
+        ctrl = self._controller()
+        prompt = handler_prompt or (
+            "The cerebellum just finished the delegated grasp. Call arm_check_grasp "
+            "(and arm_get_camera if useful) to judge the outcome against the user's "
+            "instruction. If the grasp failed, fix (e.g. a better bbox via arm_grasp) "
+            "and arm_await_grasp again. If it succeeded but the instruction isn't "
+            "finished, invoke the next step (arm_invoke + arm_await_completion). If "
+            "the whole instruction is done, call arm_report_done."
+        )
+        already = ("The cerebellum already reported the grasp result before the "
+                   "session could suspend. Do NOT end your turn — call "
+                   "arm_check_grasp now to judge it, then continue with the next "
+                   "step or arm_report_done.")
+        # Race guard: the grasp can fail fast (e.g. cerebellum unconfigured) and
+        # publish its result before this handler registers — same no-replay hazard
+        # as arm_await_completion.
+        if ctrl is not None and ctrl.grasp_result_ready():
+            return already
+        hid = agent.create_bus_handler(
+            P.TOPIC_GRASP_RESULT, prompt, once=True, inherit_session=True,
+            description="cerebellum grasp checker",
+        )
+        if ctrl is not None and ctrl.grasp_result_ready():
+            agent.remove_bus_handler(hid)
+            return already
+        self._start_watchdog(agent, hid, prompt, timeout_s)
+        return (f"Registered grasp-result handler {hid} (watchdog {timeout_s:.0f}s). "
+                "END YOUR TURN now to suspend the session; the cerebellum's "
+                "arm.grasp.result — or the watchdog — will wake the checker.")
+
+    def arm_check_grasp(self) -> str:
+        """Return the cerebellum's latest grasp result (arm.grasp.result payload)."""
+        ctrl = self._controller()
+        if ctrl is None:
+            return "ERROR: arm bus not available in this context"
+        res = ctrl.last_grasp_result()
+        if not res:
+            return "(no grasp result yet — the cerebellum has not reported back)"
+        return json.dumps(res, ensure_ascii=False)
+
     def arm_check_result(self) -> str:
         """Return the latest step result + scene snapshot to judge the step."""
         ctrl = self._controller()
@@ -304,6 +435,9 @@ class ArmTools:
             self.arm_describe,
             self.arm_reset,
             self.arm_get_scene,
+            self.arm_grasp,
+            self.arm_await_grasp,
+            self.arm_check_grasp,
             self.arm_invoke,
             self.arm_act,
             self.arm_await_completion,

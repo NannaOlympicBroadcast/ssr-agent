@@ -28,7 +28,7 @@ from typing import Callable
 
 from . import jsonrpc
 from .core import MessageBus
-from .events import BusEvent, topic_matches
+from .events import BusEvent, max_message_bytes, topic_matches
 
 
 class BusClient:
@@ -91,7 +91,7 @@ class BusClient:
         connected_once = False
         while not self._closed:
             try:
-                async with websockets.connect(self.url, max_size=8 * 1024 * 1024) as ws:
+                async with websockets.connect(self.url, max_size=max_message_bytes()) as ws:
                     self._ws = ws
                     self._ready.set()
                     if connected_once:

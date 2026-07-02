@@ -1,6 +1,14 @@
 {
   "name": "openarm",
-  "version": "0.1.0",
-  "description": "OpenArm / Isaac Lab robot-arm control. Capability-driven skills (pick / place_at / move_above / raw) discovered at runtime and driven over the SSR event bus with a suspend -> completion-handler -> wake loop. Contributes the arm_* agent tools in-process; the environment side is the ssr-robotics Isaac Lab bridge.",
-  "agent_tools": ["ssr.robotics.tools:ArmTools"]
+  "version": "0.2.0",
+  "description": "OpenArm / Isaac Lab robot-arm control with a big-brain/cerebellum (大脑/小脑) split. Contributes the arm_* agent tools in-process (capability-driven skills discovered at runtime, driven over the SSR event bus with a suspend -> completion-handler -> wake loop) and hosts the cerebellum: a bus handler on arm.grasp.request that grasps via the Om-Agent VLX-Flow streaming vision model (camera RTSP stream in, realtime servo corrections out, arm.grasp.result callback). Configure VLX in ~/.ssr/vlx.json (OM_API_KEY / VLX_RTSP_PULL_URL). The environment side is the ssr-robotics Isaac Lab bridge.",
+  "agent_tools": ["ssr.robotics.tools:ArmTools"],
+  "handlers": [
+    {
+      "event": "arm.grasp.request",
+      "kind": "python",
+      "type": "every",
+      "code": "from ssr.robotics.cerebellum import handle_grasp_event\nhandle_grasp_event(event, bus, settings)"
+    }
+  ]
 }

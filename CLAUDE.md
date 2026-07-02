@@ -74,9 +74,16 @@ SSR Agent (`ssr`) is a command-line coding agent built on **Google ADK** with
   `~/.ssr/plugins.json`; MCP servers also merge with `~/.ssr/mcp.json`. Shared
   credentials via `${namespace.key}` → `~/.ssr/<namespace>.json` (e.g. a plugin can
   reference `${xiaomi.account}` to reuse the `xiaomi` channel's credentials). Ships
-  `chrome-devtools`, `openarm` (the OpenArm/Isaac-Lab arm-control `arm_*` tools —
-  formerly the removed `ssr arm` command), and `miloco` (the Mi Home `miloco_*`
-  tools, see below) — both `openarm` and `miloco` contribute their tools in-process
+  `chrome-devtools`, `openarm` (OpenArm/Isaac-Lab arm control — formerly the
+  removed `ssr arm` command — with a **big-brain/cerebellum** split: the `arm_*`
+  agent tools let the agent perceive/plan and crop the grasp target out of the
+  camera frame (`arm_grasp`), while the plugin's `arm.grasp.request` bus handler
+  hosts the **cerebellum** (`ssr/robotics/cerebellum.py`) that grasps via the
+  Om-Agent **VLX-Flow** streaming vision model — camera pushed as RTSP by the
+  bridge, realtime `servo` corrections back, `arm.grasp.result` callback;
+  configure `~/.ssr/vlx.json` / `OM_API_KEY` / `VLX_RTSP_PULL_URL`), and `miloco`
+  (the Mi Home `miloco_*` tools, see below) — both `openarm` and `miloco`
+  contribute their tools in-process
   via `agent_tools` and are toggleable with `ssr plugin disable <name>`. (The former
   `miot` plugin was **removed** — Mi Home control now lives in the `miloco`
   integration below.)

@@ -29,7 +29,7 @@ import uuid
 
 from . import jsonrpc
 from .core import MessageBus
-from .events import BusEvent, topic_matches
+from .events import BusEvent, max_message_bytes, topic_matches
 
 
 class _Peer:
@@ -68,7 +68,8 @@ class BusServer:
         import websockets
 
         self._loop = asyncio.get_event_loop()
-        async with websockets.serve(self._handler, self.host, self.port, max_size=8 * 1024 * 1024):
+        async with websockets.serve(self._handler, self.host, self.port,
+                                    max_size=max_message_bytes()):
             print(f"[ssr-bus] listening on ws://{self.host}:{self.port}")
             await asyncio.Future()  # run forever
 
@@ -220,7 +221,7 @@ def serve_in_thread(
         async def _serve() -> None:
             try:
                 ws_server = await websockets.serve(
-                    server._handler, host, port, max_size=8 * 1024 * 1024
+                    server._handler, host, port, max_size=max_message_bytes()
                 )
             except BaseException as e:  # bind failure, etc.
                 box["error"] = e

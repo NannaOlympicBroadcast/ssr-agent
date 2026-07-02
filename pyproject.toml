@@ -28,6 +28,7 @@ dependencies = [
   "websockets>=12.0",
   "miservice_fork>=2.9",
   "aiohttp>=3.9",
+  "pillow>=10.0",
 ]
 
 [project.optional-dependencies]

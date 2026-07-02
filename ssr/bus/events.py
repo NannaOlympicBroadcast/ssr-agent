@@ -57,6 +57,24 @@ class BusEvent:
         )
 
 
+def max_message_bytes(default_mb: int = 8) -> int:
+    """Maximum WebSocket message size for bus transports, in bytes.
+
+    Bus events may carry images (base64 camera frames / target crops — the
+    big-brain→cerebellum grasp protocol relies on this), so the frame limit is
+    sized in megabytes and overridable per deployment with ``SSR_BUS_MAX_MSG_MB``
+    when higher-resolution cameras need more headroom.
+    """
+    import os
+
+    raw = os.environ.get("SSR_BUS_MAX_MSG_MB", "")
+    try:
+        mb = int(raw) if raw.strip() else default_mb
+    except ValueError:
+        mb = default_mb
+    return max(1, mb) * 1024 * 1024
+
+
 def topic_matches(pattern: str, topic: str) -> bool:
     """Return whether ``topic`` matches a subscription ``pattern``.
 

@@ -27,13 +27,16 @@ class ArmController:
         self._caps: dict | None = None
         self._last_completion: dict | None = None
         self._last_state: dict | None = None
+        self._last_grasp_result: dict | None = None
         self._episode = 0
         # seq_id of the most recently dispatched action, so we can tell whether a
         # cached completion belongs to the step we're currently waiting on.
         self._pending_seq: str | None = None
+        # seq_id of the most recently delegated grasp (cerebellum), same idea.
+        self._pending_grasp_seq: str | None = None
         self.bus.subscribe(P.TOPIC_CAPS, self._on_caps)
-        self.bus.subscribe(P.TOPIC_GRASP_COMPLETED, self._on_completion)
         self.bus.subscribe(P.TOPIC_ACTION_COMPLETED, self._on_completion)
+        self.bus.subscribe(P.TOPIC_GRASP_RESULT, self._on_grasp_result)
         self.bus.subscribe(P.TOPIC_STATE, self._on_state)
 
     # ------------------------------------------------------------- listeners
@@ -44,6 +47,10 @@ class ArmController:
     def _on_completion(self, ev: BusEvent) -> None:
         with self._lock:
             self._last_completion = dict(ev.payload)
+
+    def _on_grasp_result(self, ev: BusEvent) -> None:
+        with self._lock:
+            self._last_grasp_result = dict(ev.payload)
 
     def _on_state(self, ev: BusEvent) -> None:
         with self._lock:
@@ -81,6 +88,21 @@ class ArmController:
         self.bus.publish(P.TOPIC_ACTION_EXECUTE, req.to_payload(), source=self.source)
         return req.seq_id
 
+    def grasp(self, req: P.ArmGraspRequest) -> str:
+        """Delegate a grasp to the cerebellum; returns the assigned seq_id.
+
+        Non-blocking, like :meth:`execute`: the cerebellum runs its VLX-Flow
+        realtime loop and eventually publishes ``arm.grasp.result``, which is
+        cached here for :meth:`last_grasp_result` / :meth:`grasp_result_ready`.
+        """
+        if not req.seq_id:
+            req.seq_id = uuid.uuid4().hex[:10]
+        with self._lock:
+            self._pending_grasp_seq = req.seq_id
+            self._last_grasp_result = None
+        self.bus.publish(P.TOPIC_GRASP_REQUEST, req.to_payload(), source=self.source)
+        return req.seq_id
+
     def request_state(self) -> None:
         self.bus.publish(P.TOPIC_STATE_REQUEST, {}, source=self.source)
 
@@ -108,6 +130,18 @@ class ArmController:
         with self._lock:
             c = self._last_completion
             return bool(c and self._pending_seq and c.get("seq_id") == self._pending_seq)
+
+    def last_grasp_result(self) -> dict | None:
+        with self._lock:
+            return dict(self._last_grasp_result) if self._last_grasp_result else None
+
+    def grasp_result_ready(self) -> bool:
+        """Whether the result of the most recently delegated grasp already arrived
+        (same race guard as :meth:`completion_ready`, for the cerebellum loop)."""
+        with self._lock:
+            r = self._last_grasp_result
+            return bool(r and self._pending_grasp_seq
+                        and r.get("seq_id") == self._pending_grasp_seq)
 
     def last_state(self) -> dict | None:
         with self._lock:

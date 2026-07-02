@@ -4,7 +4,8 @@ There is no simulator here — the SSR agent only speaks :mod:`ssr.bus` events. 
 environment side is the Isaac Lab bridge (``ssr-robotics`` /
 ``openarm_isaac_lab/scripts/ssr_bridge``) which must be connected to the same bus
 server. A real :class:`~ssr.agent.core.SSRAgent` (the LLM) reads the instruction,
-perceives the scene via the arm tools, and composes pick / place / move steps —
+perceives the scene via the arm tools, and composes grasp (delegated to the
+cerebellum) / place / move steps —
 each run through the suspend → handler → wake → verify paradigm — until done.
 """
 
@@ -55,7 +56,7 @@ def run_instruction(settings, instruction: str, bus_url: str | None = None,
 
     agent.bus.subscribe(P.TOPIC_TASK_SUCCESS, _on_success)
     agent.bus.subscribe(P.TOPIC_ACTION_COMPLETED, _bump)
-    agent.bus.subscribe(P.TOPIC_GRASP_COMPLETED, _bump)
+    agent.bus.subscribe(P.TOPIC_GRASP_RESULT, _bump)
     agent.bus.subscribe(P.TOPIC_STATE, _bump)
 
     prompt = (
@@ -63,16 +64,19 @@ def run_instruction(settings, instruction: str, bus_url: str | None = None,
         "你可以操作一台 Isaac Lab 中的 OpenArm 机械臂来完成它。流程要求：\n"
         "1) 先调用 arm_describe 了解这台机械臂支持哪些动作/技能（skills）及其参数，"
         "再调用 arm_reset、arm_get_scene 观察场景中的物体及位置（必要时看相机图）。\n"
-        "2) 只使用 arm_describe 返回的技能来规划：用 arm_invoke(skill, args) 调用某个技能，"
-        "或用 arm_act 发送底层动作向量；不要假设任何未被通告的动作类型或物体名称。\n"
-        "3) 注意避障：arm_describe 返回的 obstacles 列出了桌面/支撑台等障碍物（root 坐标系下的 "
-        "AABB 包围盒）。把它们当作碰撞体——不要让机械臂或夹爪的运动路径穿过这些区域。规划时"
-        "先抬到物体正上方再下降抓取，移动到别处前先抬升到障碍物之上，避免在低空横向直线穿过桌面/台子。\n"
-        "4) 抓取坐标只需大致即可：机械臂会用相机视觉（俯视相机，若配置了腕部相机还会做局部居中修正）"
-        "精确定位抓取点；到达航点也有一定容差范围，不必追求绝对精确。\n"
-        "5) 每下发一步后，调用 arm_await_completion 注册回调，然后结束本回合以挂起会话、释放资源。\n"
-        "6) 被总线事件唤醒后，用 arm_check_result（必要时 arm_get_camera）判断这一步是否成功：\n"
-        "   失败就修正并重发该步；成功但指令未完成就下发下一步；都完成后调用 arm_report_done。"
+        "2) 抓取采用大脑/小脑分工：你（大脑）只负责用 arm_get_camera 查看相机画面、"
+        "找到目标物体的像素包围盒，然后调用 arm_grasp(label, bbox_json) 把抓取委托给小脑"
+        "（小脑用 VLX-Flow 实时视觉闭环驱动机械臂完成抓取）。不要自己规划抓取轨迹。\n"
+        "3) 非抓取动作（放置、移动等）只使用 arm_describe 返回的技能：用 arm_invoke(skill, args)"
+        " 调用，或用 arm_act 发送底层动作向量；不要假设任何未被通告的动作类型或物体名称。\n"
+        "4) 注意避障：arm_describe 返回的 obstacles 列出了桌面/支撑台等障碍物（root 坐标系下的 "
+        "AABB 包围盒）。把它们当作碰撞体——不要让机械臂或夹爪的运动路径穿过这些区域；"
+        "移动到别处前先抬升到障碍物之上，避免在低空横向直线穿过桌面/台子。\n"
+        "5) 每下发一步后注册回调再结束本回合以挂起会话、释放资源：抓取用 arm_await_grasp，"
+        "其他动作用 arm_await_completion。\n"
+        "6) 被总线事件唤醒后判断这一步是否成功（抓取用 arm_check_grasp，其他用 arm_check_result，"
+        "必要时 arm_get_camera）：失败就修正并重发该步；成功但指令未完成就下发下一步；"
+        "都完成后调用 arm_report_done。"
     )
     if console:
         console.print(f"[bold]User:[/bold] {instruction}")
