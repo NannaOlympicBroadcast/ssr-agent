@@ -78,6 +78,15 @@ class SSRAgent:
         # Interruption + concurrent side-question (/stop, /btw) coordination.
         self._stop_event = threading.Event()
         self._busy = threading.Event()
+        # Images a tool wants the MODEL to actually see (not just a text summary).
+        # A tool's return value is always a plain string — the (google-genai)
+        # provider loop only ever wraps that string in a function_response, which
+        # carries NO image bytes to the model. A tool that produces an image (e.g.
+        # arm_get_camera saving a camera frame) must call queue_tool_image so the
+        # provider loop can inject the real pixels into the next model turn; see
+        # take_tool_images().
+        self._pending_tool_images: list = []
+        self._pending_tool_images_lock = threading.Lock()
         # Live event observers (e.g. srdb watchers). Notified by every _emit,
         # independent of the TUI `on_event` (which is None for channel agents),
         # so an agent's real-time activity can be streamed even headless.
@@ -509,6 +518,28 @@ class SSRAgent:
             self._stop_event.set()
             return True
         return False
+
+    # ------------------------------------------------------------ tool images
+    def queue_tool_image(self, data: bytes, mime_type: str = "image/png", label: str = "") -> None:
+        """Queue raw image bytes for the model to see on the NEXT provider call.
+
+        Call this from within a tool implementation right after producing an
+        image (e.g. saving a camera frame) — a tool's return value is plain text,
+        so without this the model only ever sees a path/description string, never
+        the actual pixels. The provider loop drains this immediately after running
+        that tool call (see :meth:`take_tool_images`) and injects the bytes as an
+        inline image part, the same mechanism :meth:`run_parts` uses for images
+        attached to the initial turn.
+        """
+        with self._pending_tool_images_lock:
+            self._pending_tool_images.append(
+                {"data": bytes(data), "mime_type": mime_type or "image/png", "label": label})
+
+    def take_tool_images(self) -> list:
+        """Pop and return every image queued since the last call (FIFO, cleared)."""
+        with self._pending_tool_images_lock:
+            imgs, self._pending_tool_images = self._pending_tool_images, []
+            return imgs
 
     def should_stop(self, tag: str = "ssr") -> bool:
         """Whether the current main turn has been asked to stop (via /stop)."""

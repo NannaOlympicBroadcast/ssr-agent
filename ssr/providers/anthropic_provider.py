@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import base64
 import inspect
 from google.genai import types
 from ssr.providers.base import AbstractProvider
@@ -111,7 +112,9 @@ class AnthropicProvider(AbstractProvider):
                 
                 text_content = ""
                 tool_calls = []
-                
+                image_blocks = []
+                tool_result_blocks = []
+
                 parts = content.parts or []
                 for part in parts:
                     if getattr(part, "text", None):
@@ -125,25 +128,42 @@ class AnthropicProvider(AbstractProvider):
                         })
                     elif getattr(part, "function_response", None):
                         resp = getattr(part, "function_response")
-                        # Tool responses must follow tool_use messages in Anthropic
-                        messages.append({
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": f"call_{resp.name}",
-                                    "content": str(resp.response.get("result", "") if resp.response else ""),
-                                }
-                            ]
+                        tool_result_blocks.append({
+                            "type": "tool_result",
+                            "tool_use_id": f"call_{resp.name}",
+                            "content": str(resp.response.get("result", "") if resp.response else ""),
                         })
-                
-                if role != "tool":
+                    elif getattr(part, "inline_data", None) is not None:
+                        # Raw image bytes queued by a tool (e.g. arm_get_camera) or
+                        # attached to the initial turn (run_parts) — without this
+                        # branch these silently vanish and the model never sees them.
+                        blob = part.inline_data
+                        image_blocks.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": blob.mime_type or "image/png",
+                                "data": base64.b64encode(blob.data).decode("ascii"),
+                            },
+                        })
+
+                if tool_result_blocks:
+                    # ALL tool_result blocks for this round (+ any images the tools
+                    # produced) must ride in a SINGLE user message: Anthropic
+                    # requires strict user/assistant alternation, so one tool_result
+                    # per message would either violate that (multiple tool_use
+                    # blocks need their results batched together) or silently drop
+                    # any image collected alongside a "tool"-role content, since the
+                    # generic branch below is skipped for role == "tool".
+                    messages.append({"role": "user", "content": tool_result_blocks + image_blocks})
+                elif role != "tool":
                     content_list = []
                     if text_content:
                         content_list.append({"type": "text", "text": text_content})
                     for tc in tool_calls:
                         content_list.append(tc)
-                    
+                    content_list.extend(image_blocks)
+
                     if content_list:
                         messages.append({"role": role, "content": content_list})
 
@@ -193,11 +213,12 @@ class AnthropicProvider(AbstractProvider):
 
             # Execute tool calls
             fr_parts = []
+            image_parts = []
             for tc in anthropic_calls:
                 name = tc.name
                 args = dict(tc.input or {})
                 fn = dispatch.get(name)
-                
+
                 if is_mcp_tool_name(name) and self.agent_instance is not None:
                     try:
                         result = self.agent_instance.mcp_manager.call_tool(name, args)
@@ -210,15 +231,28 @@ class AnthropicProvider(AbstractProvider):
                         result = fn(**args)
                     except Exception as e:
                         result = f"ERROR: {type(e).__name__}: {e}"
-                        
+
                 if self.agent_instance is not None:
                     self.agent_instance._emit("tool_result", tag=tag, name=name, result=str(result))
-                    
+
                 fr_parts.append(
                     types.Part.from_function_response(
                         name=name, response={"result": str(result)}
                     )
                 )
-            contents.append(types.Content(role="tool", parts=fr_parts))
+                # See gemini.py for why: a tool's return value is text-only, so a
+                # tool that produced an image (e.g. arm_get_camera) must queue the
+                # raw bytes for the model to actually see, not just read a caption.
+                if self.agent_instance is not None:
+                    for img in self.agent_instance.take_tool_images():
+                        image_parts.append(
+                            types.Part.from_bytes(data=img["data"], mime_type=img.get("mime_type") or "image/png")
+                        )
+            # Image parts ride in the SAME Content as the function_response(s), not
+            # a separate trailing message — Anthropic requires strict user/assistant
+            # alternation, so a lone extra "user" turn right after the tool_result
+            # "user" turn would be rejected. The translation loop above merges them
+            # into that same tool_result message (see the elif inline_data branch).
+            contents.append(types.Content(role="tool", parts=fr_parts + image_parts))
 
         return "(reached tool-call limit without a final answer)"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import base64
 import inspect
 from google.genai import types
 from ssr.providers.base import AbstractProvider
@@ -120,7 +121,8 @@ class OpenAIProvider(AbstractProvider):
                 
                 text_content = ""
                 tool_calls = []
-                
+                image_blocks = []
+
                 parts = content.parts or []
                 for part in parts:
                     if getattr(part, "text", None):
@@ -142,8 +144,29 @@ class OpenAIProvider(AbstractProvider):
                             "name": resp.name,
                             "content": str(resp.response.get("result", "") if resp.response else ""),
                         })
-                
-                if role != "tool":
+                    elif getattr(part, "inline_data", None) is not None:
+                        # Raw image bytes queued by a tool (e.g. arm_get_camera) or
+                        # attached to the initial turn (run_parts) — without this
+                        # branch these silently vanish and the model never sees them.
+                        blob = part.inline_data
+                        b64 = base64.b64encode(blob.data).decode("ascii")
+                        image_blocks.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{blob.mime_type or 'image/png'};base64,{b64}"},
+                        })
+
+                if image_blocks:
+                    # OpenAI "tool" messages only carry string content — images
+                    # can't ride inside them — so they go out as a separate
+                    # following "user" message. Unlike Anthropic, OpenAI has no
+                    # strict alternation requirement, so a user message right
+                    # after the tool result(s) is fine.
+                    content_list = []
+                    if text_content:
+                        content_list.append({"type": "text", "text": text_content})
+                    content_list.extend(image_blocks)
+                    messages.append({"role": "user", "content": content_list})
+                elif role != "tool":
                     msg = {"role": role}
                     if text_content:
                         msg["content"] = text_content
@@ -192,11 +215,12 @@ class OpenAIProvider(AbstractProvider):
 
             # Execute tool calls
             fr_parts = []
+            image_parts = []
             for tc in openai_calls:
                 name = tc.function.name
                 args = json.loads(tc.function.arguments)
                 fn = dispatch.get(name)
-                
+
                 if is_mcp_tool_name(name) and self.agent_instance is not None:
                     try:
                         result = self.agent_instance.mcp_manager.call_tool(name, args)
@@ -209,15 +233,23 @@ class OpenAIProvider(AbstractProvider):
                         result = fn(**args)
                     except Exception as e:
                         result = f"ERROR: {type(e).__name__}: {e}"
-                        
+
                 if self.agent_instance is not None:
                     self.agent_instance._emit("tool_result", tag=tag, name=name, result=str(result))
-                    
+
                 fr_parts.append(
                     types.Part.from_function_response(
                         name=name, response={"result": str(result)}
                     )
                 )
-            contents.append(types.Content(role="tool", parts=fr_parts))
+                # See gemini.py for why: a tool's return value is text-only, so a
+                # tool that produced an image (e.g. arm_get_camera) must queue the
+                # raw bytes for the model to actually see, not just read a caption.
+                if self.agent_instance is not None:
+                    for img in self.agent_instance.take_tool_images():
+                        image_parts.append(
+                            types.Part.from_bytes(data=img["data"], mime_type=img.get("mime_type") or "image/png")
+                        )
+            contents.append(types.Content(role="tool", parts=fr_parts + image_parts))
 
         return "(reached tool-call limit without a final answer)"

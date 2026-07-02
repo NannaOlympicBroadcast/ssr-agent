@@ -22,7 +22,11 @@ advertised — add a skill on the robot and the agent can use it with no code ch
 **Perception is camera-only.** The agent is never handed object positions. It
 looks at the camera frame (`arm_get_camera`), finds the target in the image, and
 names it by **pixel** `(px, py)`; the bridge back-projects that pixel through the
-camera. For each step the agent plans:
+camera. `arm_get_camera` attaches the actual frame to the agent's next turn as a
+real inline image (via `SSRAgent.queue_tool_image`/`take_tool_images`, drained by
+every provider's tool loop) — a tool's return value is otherwise plain text, so
+without this the agent would only ever read a saved-path string and could never
+actually see what it's picking. For each step the agent plans:
 
 0. **Look** — `arm_get_camera` fetches a fresh frame; the agent reads the target's
    pixel off the image.

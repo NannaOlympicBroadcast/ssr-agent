@@ -256,12 +256,13 @@ class ArmTools:
         return json.dumps(view, ensure_ascii=False)
 
     def arm_get_camera(self, path: str = "") -> str:
-        """Look through the robot's camera: fetch a FRESH frame, save it to a PNG and
-        return its path.
+        """Look through the robot's camera: fetch a FRESH frame and SHOW it to you.
 
-        This is how you perceive the scene — read object locations straight off this
-        image (you are never handed object coordinates). Identify your target in the
-        picture and pass its pixel (px, py) to pick/place_at/move_above.
+        This is how you perceive the scene — the frame is attached to your next
+        turn as an actual image (not just a saved path), so read object locations
+        straight off it (you are never handed object coordinates). Identify your
+        target in the picture and pass its pixel (px, py) to
+        pick/place_at/move_above. It is also saved to disk for reference.
 
         Args:
             path: optional output path; defaults to the project dir.
@@ -278,14 +279,22 @@ class ArmTools:
         b64 = (snap or {}).get("frame_b64")
         if not b64:
             return "(no camera frame available — is the Isaac bridge connected?)"
+        data = base64.b64decode(b64)
         out = self.toolkit._resolve(path or "arm_frame.png")
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(base64.b64decode(b64))
+            out.write_bytes(data)
         except Exception as e:
             return f"ERROR: could not write frame: {e}"
+        # Queue the actual pixels for the model to see on its next turn — a tool's
+        # return value is plain text, so without this the model only ever reads
+        # "saved to <path>" and never the image itself (see queue_tool_image).
+        agent = getattr(self.toolkit, "agent_instance", None)
+        if agent is not None and hasattr(agent, "queue_tool_image"):
+            agent.queue_tool_image(data, mime_type="image/png", label="arm camera frame")
         meta = snap.get("camera") or {}
-        return f"Saved camera frame to {out} ({meta.get('width', '?')}x{meta.get('height', '?')})."
+        return (f"Camera frame captured and attached to this turn "
+                f"({meta.get('width', '?')}x{meta.get('height', '?')}); also saved to {out}.")
 
     def arm_record_start(self, camera: str = "") -> str:
         """Start recording a robot camera (non-blocking).

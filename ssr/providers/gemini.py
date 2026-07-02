@@ -63,12 +63,13 @@ class GeminiProvider(AbstractProvider):
                 self.agent_instance._emit("thinking", tag=tag, text=text)
                 
             fr_parts = []
+            image_parts = []
             for call in calls:
                 fn = dispatch.get(call.name)
                 args = dict(call.args or {})
                 if self.agent_instance is not None:
                     self.agent_instance._emit("tool_call", tag=tag, name=call.name, args=args)
-                
+
                 if is_mcp_tool_name(call.name) and self.agent_instance is not None:
                     try:
                         result = self.agent_instance.mcp_manager.call_tool(call.name, args)
@@ -81,15 +82,28 @@ class GeminiProvider(AbstractProvider):
                         result = fn(**args)
                     except Exception as e:
                         result = f"ERROR: {type(e).__name__}: {e}"
-                        
+
                 if self.agent_instance is not None:
                     self.agent_instance._emit("tool_result", tag=tag, name=call.name, result=str(result))
-                    
+
                 fr_parts.append(
                     types.Part.from_function_response(
                         name=call.name, response={"result": str(result)}
                     )
                 )
-            contents.append(types.Content(role="tool", parts=fr_parts))
+                # A tool's return value is plain text (the function_response above).
+                # If it also queued real image bytes (e.g. arm_get_camera), attach
+                # them so the model actually SEES the pixels, not just a caption.
+                if self.agent_instance is not None:
+                    for img in self.agent_instance.take_tool_images():
+                        image_parts.append(
+                            types.Part.from_bytes(data=img["data"], mime_type=img.get("mime_type") or "image/png")
+                        )
+            # Image parts ride in the SAME Content as the function_response(s), not
+            # a separate trailing message — Anthropic in particular requires strict
+            # user/assistant turn alternation, so a lone extra message would break
+            # it; keeping everything from this tool-execution round in one Content
+            # is safe for every provider's translation.
+            contents.append(types.Content(role="tool", parts=fr_parts + image_parts))
             
         return "(reached tool-call limit without a final answer)"
