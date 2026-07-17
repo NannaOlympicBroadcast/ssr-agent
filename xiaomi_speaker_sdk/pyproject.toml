@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xiaomi-speaker-sdk"
+version = "0.1.0"
+description = "Standalone SDK for XiaoAI (小爱音箱) speakers: listen for ASR utterances and take over TTS playback with a single Mi cloud token."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "SSR Agent" }]
+keywords = ["xiaoai", "xiaomi", "mi-speaker", "asr", "tts", "miservice"]
+
+dependencies = [
+  "aiohttp>=3.9",
+  "miservice_fork>=2.9",
+]
+
+[project.optional-dependencies]
+browser-login = ["httpx>=0.27", "websockets>=12.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+xiaomi-speaker = "xiaomi_speaker_sdk.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["xiaomi_speaker_sdk*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
